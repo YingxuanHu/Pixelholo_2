@@ -66,6 +66,7 @@ python src/run_lipsync.py \
 ```
 
 ## Run (PixelHolo-style single-pass)
+(Optional dependency: `pip install lipsync==0.1.0` — uses PyAV, may fail on ffmpeg 8.)
 Uses the `lipsync` library (Wav2Lip wrapper) the same way PixelHolo does: load once,
 cache face detections, and run a single pass over the full video.
 ```bash
