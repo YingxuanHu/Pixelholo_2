@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Virtual envs
+.venv/
+.venv_*/
+.venv_py*/
+venv/
+env/
+
+# Node
+node_modules/
+
+# Build/packaging
+/dist/
+/build/
+
+# Logs/temp
+*.log
+/tmp/
+/temp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data + outputs (generated)
+services/voice_cloning/data/
+services/voice_cloning/outputs/
+services/lip_syncing/data/
+services/lip_syncing/outputs/
+
+# Model weights / checkpoints
+services/lip_syncing/models/
+services/voice_cloning/models/
+services/voice_cloning/lib/StyleTTS2/Models/
+
+# Frontend artifacts
+apps/frontend/.env*
+
+# Reference / scratch
+reference/

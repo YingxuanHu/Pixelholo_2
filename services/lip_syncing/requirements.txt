@@ -1,0 +1,7 @@
+librosa
+lipsync==0.1.0
+numpy
+opencv-python
+scipy
+soundfile
+tqdm
