@@ -2,6 +2,13 @@
 
 Chunked and single-pass Wav2Lip runners for PixelHolo. This repo can be used standalone or driven by `voice_cloning/src/speak_video.py`.
 
+## TL;DR Quickstart
+```bash
+cd /home/alvin/PixelHolo_trial/lip_syncing
+source .venv/bin/activate
+python src/run_lipsync.py --video /path/to/source_video.mp4
+```
+
 ## Layout
 - `lib/Wav2Lip/` - Wav2Lip repo (clone here)
 - `models/` - Wav2Lip checkpoints
@@ -78,3 +85,9 @@ python /home/alvin/PixelHolo_trial/voice_cloning/src/speak_video.py   --profile 
 ## Notes
 - Wav2Lip expects 16 kHz mono audio; the script resamples per chunk.
 - Chunking is for low-latency testing and streaming.
+
+
+## Troubleshooting
+- **No face detected**: try `--pads` and `--resize_factor 1`.
+- **OOM**: lower `--face_det_batch_size` or `--wav2lip_batch_size`.
+- **Bad colors (HDR)**: run through the wrapper (`run_lipsync.py`) which tone-maps.

@@ -39,6 +39,7 @@ export interface InferenceChunk {
 
 export interface ProfileInfo {
   name: string;
+  profile_type?: string;
   has_data: boolean;
   raw_files: number;
   processed_wavs: number;

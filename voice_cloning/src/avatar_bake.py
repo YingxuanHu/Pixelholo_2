@@ -10,7 +10,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import DATA_DIR, LIP_SYNCING_DIR, avatar_cache_dir
+from config import (
+    LIP_SYNCING_DIR,
+    PROFILE_TYPE_AVATAR,
+    PROFILE_TYPE_VOICE,
+    avatar_cache_dir,
+)
 
 
 def _smooth_boxes(boxes: np.ndarray, window: int = 5) -> np.ndarray:
@@ -38,6 +43,7 @@ def _load_detector(device: str = "cuda"):
 def bake_avatar(
     profile: str,
     video_path: Path,
+    profile_type: str = PROFILE_TYPE_AVATAR,
     fps: float = 25.0,
     loop_sec: float = 10.0,
     resize_factor: int = 1,
@@ -46,7 +52,7 @@ def bake_avatar(
     nosmooth: bool = False,
     device: str = "cuda",
 ) -> Path:
-    cache_dir = avatar_cache_dir(profile)
+    cache_dir = avatar_cache_dir(profile, profile_type)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     cap = cv2.VideoCapture(str(video_path))
@@ -93,7 +99,10 @@ def bake_avatar(
                 raise RuntimeError("Face not detected in the first frame.")
             coords.append(last_good)
             continue
-        x1, y1, x2, y2, _ = pred
+        values = list(pred)
+        if len(values) < 4:
+            raise RuntimeError(f"Face detector returned invalid box: {pred}")
+        x1, y1, x2, y2 = values[:4]
         y1 = max(0, int(y1) - top_pad)
         y2 = min(frame.shape[0], int(y2) + bottom_pad)
         x1 = max(0, int(x1) - left_pad)
@@ -127,6 +136,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bake avatar frames + face coords for lip-sync.")
     parser.add_argument("--profile", required=True, help="Profile name.")
     parser.add_argument("--video", type=Path, required=True, help="Source video path.")
+    parser.add_argument(
+        "--profile_type",
+        choices=[PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR],
+        default=PROFILE_TYPE_AVATAR,
+        help="Profile type to store avatar cache under.",
+    )
     parser.add_argument("--fps", type=float, default=25.0)
     parser.add_argument("--loop_sec", type=float, default=10.0)
     parser.add_argument("--resize_factor", type=int, default=1)
@@ -143,6 +158,7 @@ def main() -> None:
     cache_dir = bake_avatar(
         profile=args.profile,
         video_path=args.video,
+        profile_type=args.profile_type,
         fps=args.fps,
         loop_sec=args.loop_sec,
         resize_factor=args.resize_factor,

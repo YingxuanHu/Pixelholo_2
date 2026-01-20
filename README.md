@@ -1,16 +1,26 @@
-# PixelHolo Trial (Monorepo)
-
-PixelHolo Trial bundles three tools under one workspace:
-- Voice cloning (StyleTTS2)
-- Lip syncing (Wav2Lip)
-- Frontend control panel (React)
-
 ## Layout
 - `frontend/` - UI control panel (Vite/React)
 - `voice_cloning/` - StyleTTS2 training + inference + API
 - `lip_syncing/` - Wav2Lip chunked and single-pass runners
 - `reference/` - legacy UI reference (not used in production)
 
+
+## TL;DR Quickstart
+```bash
+# Voice cloning
+cd /home/alvin/PixelHolo_trial/voice_cloning
+source .venv/bin/activate
+python src/preprocess.py --video /path/to/user.mp4 --name alice --profile_type voice
+python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type voice
+python src/speak.py --profile alice --profile_type voice --text "Hello"
+
+# Voice + lip sync video
+python src/speak_video.py --profile alice --profile_type avatar --text "Hello from video"
+
+# Frontend
+cd /home/alvin/PixelHolo_trial/frontend
+npm run dev
+```
 ## Requirements
 - Linux + NVIDIA GPU recommended
 - `ffmpeg` and `espeak-ng` installed system-wide
@@ -94,12 +104,20 @@ npm run dev
 ```
 
 ## Data and outputs
-- `voice_cloning/data/<profile>/` - dataset + metadata
-- `voice_cloning/outputs/training/<profile>/` - checkpoints + logs
-- `voice_cloning/outputs/audio/<profile>/` - generated wav
-- `voice_cloning/outputs/video/<profile>/` - generated mp4
+- `voice_cloning/data/voice_profiles/<profile>/` - dataset + metadata
+- `voice_cloning/outputs/training/<type>/<profile>/` - checkpoints + logs
+- `voice_cloning/outputs/audio/<type>/<profile>/` - generated wav
+- `voice_cloning/outputs/video/<type>/<profile>/` - generated mp4
 
 ## Notes
 - `voice_cloning` will look for `lip_syncing` as a sibling folder under the repo root.
 - `preprocess.py` bakes avatar frames for lip sync by default.
 - `frontend` can run voice-only or voice+lip-sync using the same backend.
+
+
+## Troubleshooting
+- **CUDA / cuDNN load errors**: ensure `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` are installed in the venv and `LD_LIBRARY_PATH` includes their `lib` folders.
+- **Whisper GPU errors**: confirm `torch` and `cuda` versions match your driver.
+- **Phonemizer errors**: install `espeak-ng` system-wide.
+- **ffmpeg missing**: install `ffmpeg` and ensure it is on PATH.
+- **Lip sync models not found**: confirm `lip_syncing/models/s3fd-619a316812.pth` and `lip_syncing/models/wav2lip_gan.pth` exist.

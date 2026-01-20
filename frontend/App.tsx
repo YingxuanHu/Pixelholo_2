@@ -54,6 +54,7 @@ const App: React.FC = () => {
   const [activeStep, setActiveStep] = useState(1);
   const [apiBase, setApiBase] = useState('http://127.0.0.1:8000');
   const [apiStatus, setApiStatus] = useState<'online' | 'offline' | 'checking'>('checking');
+  const [profileType, setProfileType] = useState<'voice' | 'avatar'>('voice');
   const [profile, setProfile] = useState<Profile>({ name: '', lastUploadedFile: null, fileSize: null });
   const [lastUploadedFilename, setLastUploadedFilename] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
@@ -68,6 +69,10 @@ const App: React.FC = () => {
   const [trainLogs, setTrainLogs] = useState<LogEntry[]>([]);
   const [preprocessStats, setPreprocessStats] = useState<PreprocessStats | null>(null);
   const [trainStats, setTrainStats] = useState<TrainStats | null>(null);
+  const [preprocessProgress, setPreprocessProgress] = useState<number | null>(null);
+  const [preprocessStageIndex, setPreprocessStageIndex] = useState<number | null>(null);
+  const [trainStageIndex, setTrainStageIndex] = useState<number | null>(null);
+  const [inferenceStageIndex, setInferenceStageIndex] = useState<number | null>(null);
   const [trainFlags, setTrainFlags] = useState<TrainFlags>(defaultFlags);
   const [trainParams, setTrainParams] = useState<TrainParams>(defaultTrainParams);
   const [inferenceText, setInferenceText] = useState('');
@@ -99,13 +104,23 @@ const App: React.FC = () => {
   }, [apiBase]);
 
   useEffect(() => {
+    if (profileType === 'voice') {
+      setOutputMode('voice');
+      return;
+    }
+    if (profileType === 'avatar' && outputMode === 'voice') {
+      setOutputMode('avatar');
+    }
+  }, [profileType, outputMode]);
+
+  useEffect(() => {
     videoFpsRef.current = videoFps;
   }, [videoFps]);
 
   const loadProfiles = useCallback(async () => {
     setProfilesStatus('loading');
     try {
-      const res = await fetch(`${apiBase}/profiles`);
+      const res = await fetch(`${apiBase}/profiles?profile_type=${profileType}`);
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setProfiles(Array.isArray(data.profiles) ? data.profiles : []);
@@ -113,7 +128,7 @@ const App: React.FC = () => {
     } catch (err) {
       setProfilesStatus('error');
     }
-  }, [apiBase]);
+  }, [apiBase, profileType]);
 
   useEffect(() => {
     loadProfiles();
@@ -140,6 +155,44 @@ const App: React.FC = () => {
   const hasTrainedProfile = Boolean(currentProfileInfo?.has_profile);
   const hasData = Boolean(currentProfileInfo?.has_data);
 
+  const preprocessSteps = [
+    ...(profileType === 'avatar' ? ['Bake avatar frames (Wav2Lip cache)'] : []),
+    'Extract audio track',
+    'Loudness normalize + filter',
+    'Split on silence (2–10s)',
+    'Transcribe with Whisper',
+    'Write metadata.csv',
+  ];
+  const trainSteps = [
+    'Patch config + load base model',
+    'Train epochs & save checkpoints',
+    'Auto-tune profile defaults',
+    'Auto-select best epoch',
+    'Build lexicon.json',
+  ];
+  const inferenceSteps =
+    outputMode === 'avatar'
+      ? [
+          'Resolve profile + load model',
+          'Chunk text for streaming',
+          'Synthesize audio chunks',
+          'Lip-sync video frames',
+          'Stream frames to player',
+        ]
+      : [
+          'Resolve profile + load model',
+          'Chunk text for streaming',
+          'Synthesize audio chunks',
+          'Apply smoothing + post FX',
+          'Stream audio output',
+        ];
+
+  const stageProgress = (index: number | null, total: number, cap: number) => {
+    if (index === null || total <= 0) return 0;
+    const raw = (index + 1) / total;
+    return Math.min(cap, raw * cap);
+  };
+
   const warmupProfile = useCallback(async (profileName: string) => {
     if (!profileName) return;
     if (warmedProfilesRef.current.has(profileName)) return;
@@ -148,14 +201,19 @@ const App: React.FC = () => {
       const res = await fetch(`${apiBase}/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ speaker: profileName, text: 'warmup', return_base64: true }),
+        body: JSON.stringify({
+          speaker: profileName,
+          profile_type: profileType,
+          text: 'warmup',
+          return_base64: true,
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
       await res.json();
     } catch (err) {
       warmedProfilesRef.current.delete(profileName);
     }
-  }, [apiBase]);
+  }, [apiBase, profileType]);
 
   const canProceedTo = (step: number) => {
     if (step === 1) return true;
@@ -199,6 +257,7 @@ const App: React.FC = () => {
     setStepStatuses(prev => ({ ...prev, upload: 'running' }));
     const form = new FormData();
     form.append('profile', profile.name);
+    form.append('profile_type', profileType);
     form.append('file', file);
     try {
       const res = await fetch(`${apiBase}/upload`, { method: 'POST', body: form });
@@ -220,11 +279,18 @@ const App: React.FC = () => {
   };
 
   const startPreprocess = async () => {
-    if (!profile.name || !lastUploadedFilename) return;
+    if (!profile.name) return;
     setStepStatuses(prev => ({ ...prev, preprocess: 'running' }));
     setPreprocessLogs([createLog('Pipeline starting...', 'info')]);
     setPreprocessStats(null);
-    const payload = { profile: profile.name, filename: lastUploadedFilename };
+    setPreprocessProgress(0);
+    setPreprocessStageIndex(preprocessSteps.length > 0 ? 0 : null);
+    const payload = {
+      profile: profile.name,
+      filename: lastUploadedFilename ?? null,
+      profile_type: profileType,
+      bake_avatar: profileType === 'avatar',
+    };
     try {
       const res = await fetch(`${apiBase}/preprocess`, {
         method: 'POST',
@@ -234,6 +300,27 @@ const App: React.FC = () => {
       if (!res.ok) throw new Error(await res.text());
       await streamResponseLines(res, line => {
         setPreprocessLogs(prev => [...prev, createLog(line, line.includes('Error') ? 'error' : 'info')]);
+        const stageUpdate = (label: string) => {
+          const idx = preprocessSteps.indexOf(label);
+          if (idx >= 0) {
+            setPreprocessStageIndex(prev => (prev === null || idx > prev ? idx : prev));
+          }
+        };
+        if (line.includes('Baking avatar cache')) {
+          stageUpdate('Bake avatar frames (Wav2Lip cache)');
+        } else if (line.includes('Extracting audio')) {
+          stageUpdate('Extract audio track');
+        } else if (line.includes('Loaded audio')) {
+          stageUpdate('Split on silence (2–10s)');
+        } else if (line.includes('Transcribing full audio')) {
+          stageUpdate('Transcribe with Whisper');
+        } else if (line.includes('Segments: raw=')) {
+          stageUpdate('Split on silence (2–10s)');
+        } else if (line.includes('Exporting') || (line.includes('Wrote') && line.includes('.wav'))) {
+          stageUpdate('Write metadata.csv');
+        } else if (line.includes('Metadata written')) {
+          stageUpdate('Write metadata.csv');
+        }
         const match = line.match(/Segments: raw=(\d+) merged=(\d+) kept=(\d+)/);
         if (match) {
           const raw = Number(match[1]);
@@ -247,13 +334,24 @@ const App: React.FC = () => {
             sampleRate: '24 kHz',
           });
         }
+        const wrote = line.match(/Wrote .* \((\d+)\/(\d+)\)/);
+        if (wrote) {
+          const current = Number(wrote[1]);
+          const total = Number(wrote[2]);
+          if (total > 0) {
+            setPreprocessProgress(current / total);
+          }
+        }
       });
       setStepStatuses(prev => ({ ...prev, preprocess: 'done' }));
+      setPreprocessProgress(1);
+      setPreprocessStageIndex(preprocessSteps.length ? preprocessSteps.length - 1 : null);
       setActiveStep(3);
       loadProfiles();
     } catch (err) {
       setStepStatuses(prev => ({ ...prev, preprocess: 'error' }));
       setPreprocessLogs(prev => [...prev, createLog(`Preprocess failed: ${String(err)}`, 'error')]);
+      setPreprocessStageIndex(null);
     }
   };
 
@@ -262,17 +360,19 @@ const App: React.FC = () => {
     setStepStatuses(prev => ({ ...prev, train: 'running' }));
     setTrainLogs([createLog('Launching trainer...', 'info')]);
     setTrainStats(null);
+    setTrainStageIndex(trainSteps.length > 0 ? 0 : null);
 
-      const payload = {
-        profile: profile.name,
-        batch_size: trainParams.batchSize,
-        epochs: trainParams.epochs,
-        max_len: trainParams.maxLen,
-        auto_select_epoch: trainFlags.autoSelectEpoch,
-        auto_tune_profile: trainFlags.autoTuneProfile,
-        auto_build_lexicon: trainFlags.autoBuildLexicon,
-        early_stop: trainFlags.earlyStop,
-      };
+    const payload = {
+      profile: profile.name,
+      profile_type: profileType,
+      batch_size: trainParams.batchSize,
+      epochs: trainParams.epochs,
+      max_len: trainParams.maxLen,
+      auto_select_epoch: trainFlags.autoSelectEpoch,
+      auto_tune_profile: trainFlags.autoTuneProfile,
+      auto_build_lexicon: trainFlags.autoBuildLexicon,
+      early_stop: trainFlags.earlyStop,
+    };
 
     try {
       const res = await fetch(`${apiBase}/train`, {
@@ -283,8 +383,18 @@ const App: React.FC = () => {
       if (!res.ok) throw new Error(await res.text());
       await streamResponseLines(res, line => {
         setTrainLogs(prev => [...prev, createLog(line, line.includes('Error') ? 'error' : 'info')]);
+        const stageUpdate = (label: string) => {
+          const idx = trainSteps.indexOf(label);
+          if (idx >= 0) {
+            setTrainStageIndex(prev => (prev === null || idx > prev ? idx : prev));
+          }
+        };
+        if (line.includes('Base config') || line.includes('Patched config')) {
+          stageUpdate('Patch config + load base model');
+        }
         const epochMatch = line.match(/Epoch \[(\d+)\/(\d+)\], Step \[(\d+)\/(\d+)\]/);
         if (epochMatch) {
+          stageUpdate('Train epochs & save checkpoints');
           const currentEpoch = Number(epochMatch[1]);
           const totalEpochs = Number(epochMatch[2]);
           const step = Number(epochMatch[3]);
@@ -294,16 +404,27 @@ const App: React.FC = () => {
             steps: prev?.steps ? prev.steps + step : step,
             eta: `${Math.max(0, totalEpochs - currentEpoch)} epochs`,
             gpuMemory: 'GPU active',
-            bestCheckpoint: `outputs/training/${profile.name}`,
+            bestCheckpoint: `outputs/training/${profileType}/${profile.name}`,
           }));
+        }
+        if (line.includes('Auto-tune') || line.includes('auto_tune')) {
+          stageUpdate('Auto-tune profile defaults');
+        }
+        if (line.includes('Evaluating') || line.includes('Best checkpoint') || line.includes('Top checkpoints')) {
+          stageUpdate('Auto-select best epoch');
+        }
+        if (line.toLowerCase().includes('lexicon.json')) {
+          stageUpdate('Build lexicon.json');
         }
       });
       setStepStatuses(prev => ({ ...prev, train: 'done' }));
+      setTrainStageIndex(trainSteps.length ? trainSteps.length - 1 : null);
       setActiveStep(4);
       loadProfiles();
     } catch (err) {
       setStepStatuses(prev => ({ ...prev, train: 'error' }));
       setTrainLogs(prev => [...prev, createLog(`Training failed: ${String(err)}`, 'error')]);
+      setTrainStageIndex(null);
     }
   };
 
@@ -420,6 +541,7 @@ const App: React.FC = () => {
     setStepStatuses(prev => ({ ...prev, inference: 'running' }));
     setInferenceChunks([]);
     setLatency(null);
+    setInferenceStageIndex(inferenceSteps.length > 0 ? 0 : null);
     nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
 
     if (streamAbortRef.current) {
@@ -433,6 +555,7 @@ const App: React.FC = () => {
 
     const payload: Record<string, any> = {
       speaker: profile.name,
+      profile_type: profileType,
       text: inferenceText,
       model_path: modelOverride || null,
       ref_wav_path: refOverride || null,
@@ -455,15 +578,18 @@ const App: React.FC = () => {
         if (data.event === 'done') {
           setLatency(prev => prev ? { ...prev, total: data.inference_ms ?? Math.round(performance.now() - startTime) } : null);
           setStepStatuses(prev => ({ ...prev, inference: 'done' }));
+          setInferenceStageIndex(inferenceSteps.length ? inferenceSteps.length - 1 : null);
           return;
         }
         if (!data.audio_base64) return;
         if (firstChunk) {
           firstChunk = false;
           setLatency({ ttfa: Math.round(performance.now() - startTime), total: 0 });
+          setInferenceStageIndex(Math.min(2, inferenceSteps.length - 1));
         }
         if (outputMode === 'avatar' && Array.isArray(data.frames_base64)) {
           enqueueFrames(data.frames_base64, data.fps);
+          setInferenceStageIndex(Math.min(3, inferenceSteps.length - 1));
         }
         const binary = atob(data.audio_base64);
         const bytes = new Uint8Array(binary.length);
@@ -472,25 +598,31 @@ const App: React.FC = () => {
         }
         const buffer = await audioContextRef.current!.decodeAudioData(bytes.buffer);
         scheduleBuffer(buffer);
+        if (outputMode === 'voice') {
+          setInferenceStageIndex(Math.min(4, inferenceSteps.length - 1));
+        }
         setInferenceChunks(prev => [...prev, { index: data.chunk_index, duration: buffer.duration, receivedAt: Date.now() }]);
       });
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
         setStepStatuses(prev => ({ ...prev, inference: 'error' }));
+        setInferenceStageIndex(null);
       }
     }
-  }, [apiBase, enqueueFrames, inferenceText, modelOverride, outputMode, profile.name, refOverride, resetVideo]);
+  }, [apiBase, enqueueFrames, inferenceText, modelOverride, outputMode, profile.name, profileType, refOverride, resetVideo]);
 
   const stopInference = async () => {
     if (streamAbortRef.current) streamAbortRef.current.abort();
     await resetAudio();
     resetVideo();
     setStepStatuses(prev => ({ ...prev, inference: 'idle' }));
+    setInferenceStageIndex(null);
   };
 
   const trainingCommand = [
     'python src/train.py',
-    `--dataset_path ./data/${profile.name || '<profile>'}`,
+    `--dataset_path ./data/${profileType === 'avatar' ? 'avatar_profiles' : 'voice_profiles'}/${profile.name || '<profile>'}`,
+    `--profile_type ${profileType}`,
     `--batch_size ${trainParams.batchSize}`,
     `--epochs ${trainParams.epochs}`,
     `--max_len ${trainParams.maxLen}`,
@@ -501,6 +633,102 @@ const App: React.FC = () => {
   ]
     .filter(Boolean)
     .join(' ');
+
+  const preprocessDisplayProgress =
+    stepStatuses.preprocess === 'running'
+      ? Math.max(
+          preprocessProgress ?? 0,
+          stageProgress(preprocessStageIndex, preprocessSteps.length, 0.6),
+        )
+      : stepStatuses.preprocess === 'done'
+        ? 1
+        : null;
+  const trainEpochProgress =
+    trainStats?.totalEpochs && trainStats.totalEpochs > 0
+      ? Math.min(1, trainStats.currentEpoch / trainStats.totalEpochs)
+      : 0;
+  const trainDisplayProgress =
+    stepStatuses.train === 'running'
+      ? Math.max(trainEpochProgress, stageProgress(trainStageIndex, trainSteps.length, 0.2))
+      : stepStatuses.train === 'done'
+        ? 1
+        : null;
+  const inferenceDisplayProgress =
+    stepStatuses.inference === 'running'
+      ? Math.max(
+          Math.min(1, inferenceChunks.length / 20),
+          stageProgress(inferenceStageIndex, inferenceSteps.length, 0.2),
+        )
+      : stepStatuses.inference === 'done'
+        ? 1
+        : null;
+
+  const trainingStatusCard = (
+    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 shadow-sm">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-amber-600">Training Progress</p>
+      {trainStats ? (
+        <div className="mt-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[10px] font-bold text-amber-700 uppercase">Epoch</p>
+              <p className="text-3xl font-bold text-slate-900">{((trainStats.currentEpoch / trainStats.totalEpochs) * 100).toFixed(0)}%</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] font-bold text-amber-700 uppercase">Time Remaining</p>
+              <p className="text-lg font-bold text-slate-800">{trainStats.eta}</p>
+            </div>
+          </div>
+          <div className="h-4 bg-amber-200 rounded-full overflow-hidden">
+            <div className="h-full bg-amber-600 transition-all duration-700" style={{ width: `${(trainStats.currentEpoch / trainStats.totalEpochs) * 100}%` }}></div>
+          </div>
+          <div className="grid grid-cols-2 gap-4 text-xs font-bold">
+            <div className="bg-white p-2 rounded border border-amber-100">GPU: {trainStats.gpuMemory}</div>
+            <div className="bg-white p-2 rounded border border-amber-100">Steps: {trainStats.steps.toLocaleString()}</div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4 text-xs text-amber-800">
+          Initializing trainer and loading checkpoints...
+        </div>
+      )}
+    </div>
+  );
+
+  const preprocessStatusCard = (
+    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-5 shadow-sm">
+      <p className="text-[10px] font-bold uppercase tracking-widest text-amber-600">Preprocess Progress</p>
+      <div className="mt-4 space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-[10px] font-bold text-amber-700 uppercase">Segments</p>
+            <p className="text-3xl font-bold text-slate-900">
+              {preprocessStats?.segmentsKept ?? 0}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-[10px] font-bold text-amber-700 uppercase">Status</p>
+            <p className="text-lg font-bold text-slate-800">
+              {stepStatuses.preprocess === 'running' ? 'Processing' : 'Waiting'}
+            </p>
+          </div>
+        </div>
+        <div className="h-4 bg-amber-200 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-amber-600 transition-all duration-700"
+            style={{ width: `${Math.round((preprocessDisplayProgress ?? 0) * 100)}%` }}
+          ></div>
+        </div>
+        <div className="grid grid-cols-2 gap-4 text-xs font-bold">
+          <div className="bg-white p-2 rounded border border-amber-100">
+            Kept: {preprocessStats?.segmentsKept ?? '—'}
+          </div>
+          <div className="bg-white p-2 rounded border border-amber-100">
+            Filtered: {preprocessStats?.segmentsFiltered ?? '—'}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen pb-24 bg-[#FDFCF8]">
@@ -540,6 +768,36 @@ const App: React.FC = () => {
             >
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
                 <div className="space-y-4">
+                  <div className="bg-white p-4 rounded-xl border border-slate-100">
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Workflow</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProfileType('voice');
+                          setProfile(prev => ({ ...prev, lastUploadedFile: null, fileSize: null }));
+                          setLastUploadedFilename(null);
+                        }}
+                        className={`px-3 py-2 rounded-lg text-xs font-bold transition-all ${profileType === 'voice' ? 'bg-teal-600 text-white shadow-lg shadow-teal-600/20' : 'bg-slate-100 text-slate-500'}`}
+                      >
+                        Voice Only
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProfileType('avatar');
+                          setProfile(prev => ({ ...prev, lastUploadedFile: null, fileSize: null }));
+                          setLastUploadedFilename(null);
+                        }}
+                        className={`px-3 py-2 rounded-lg text-xs font-bold transition-all ${profileType === 'avatar' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 text-slate-500'}`}
+                      >
+                        Voice + Lip Sync
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-2 italic">
+                      Voice-only profiles use audio datasets. Lip-sync profiles require video and an avatar cache.
+                    </p>
+                  </div>
                   <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
                     <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Voice Identity Name</label>
                     <input
@@ -553,8 +811,16 @@ const App: React.FC = () => {
                   </div>
                   <div className="bg-white border border-slate-100 rounded-xl p-4 text-xs text-slate-500">
                     <p className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Paths</p>
-                    <p>Dataset: <span className="font-semibold">data/{profile.name || '<profile>'}</span></p>
-                    <p>Outputs: <span className="font-semibold">outputs/training/{profile.name || '<profile>'}</span></p>
+                    <p>
+                      Dataset: <span className="font-semibold">
+                        data/{profileType === 'avatar' ? 'avatar_profiles' : 'voice_profiles'}/{profile.name || '<profile>'}
+                      </span>
+                    </p>
+                    <p>
+                      Outputs: <span className="font-semibold">
+                        outputs/training/{profileType === 'avatar' ? 'avatar' : 'voice'}/{profile.name || '<profile>'}
+                      </span>
+                    </p>
                   </div>
                   <div className="bg-white border border-slate-100 rounded-xl p-4 text-xs text-slate-500 space-y-2">
                     <div className="flex items-center justify-between">
@@ -579,6 +845,11 @@ const App: React.FC = () => {
                             key={item.name}
                             type="button"
                             onClick={() => {
+                              if (item.profile_type === 'avatar') {
+                                setProfileType('avatar');
+                              } else if (item.profile_type === 'voice') {
+                                setProfileType('voice');
+                              }
                               setProfile(prev => ({ ...prev, name: item.name }));
                               setLastUploadedFilename(null);
                               setActiveStep(item.has_profile ? 4 : 2);
@@ -592,7 +863,7 @@ const App: React.FC = () => {
                             <div>
                               <p className="text-xs font-bold">{item.name}</p>
                               <p className="text-[10px] text-slate-400">
-                                {item.processed_wavs} clips · {item.raw_files} raw
+                                {item.processed_wavs} clips · {item.raw_files} raw · {item.profile_type || profileType}
                               </p>
                             </div>
                             <div className="text-[10px] font-bold">
@@ -618,8 +889,18 @@ const App: React.FC = () => {
                       <svg className={`w-10 h-10 mx-auto mb-3 transition-colors ${!profile.name ? 'text-slate-300' : 'text-slate-400 group-hover:text-teal-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                       </svg>
-                      <p className="text-sm font-bold text-slate-700">{profile.name ? 'Select High-Quality Audio/Video' : 'Enter Profile Name First'}</p>
-                      <p className="text-xs text-slate-400 mt-1">Lossless formats preferred (.wav, .flac)</p>
+                      <p className="text-sm font-bold text-slate-700">
+                        {profile.name
+                          ? profileType === 'voice'
+                            ? 'Select High-Quality Audio'
+                            : 'Select High-Quality Video (with audio)'
+                          : 'Enter Profile Name First'}
+                      </p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {profileType === 'voice'
+                          ? 'Lossless formats preferred (.wav, .flac)'
+                          : 'Portrait video preferred (.mp4, .mov)'}
+                      </p>
                     </div>
                   </div>
                   {profile.lastUploadedFile && (
@@ -640,6 +921,16 @@ const App: React.FC = () => {
               description="Segmenting audio, removing silence, and transcribing with Whisper."
               status={stepStatuses.preprocess}
               isActive={true}
+              statusSteps={preprocessSteps}
+              statusNote={
+                profileType === 'avatar'
+                  ? 'Avatar baking runs once per profile and speeds up live lip-sync.'
+                  : 'Audio-only pipeline; no avatar baking required.'
+              }
+              progress={preprocessDisplayProgress}
+              activeStepIndex={stepStatuses.preprocess === 'running' ? preprocessStageIndex : null}
+              statusContent={preprocessStatusCard}
+              showStepsWithContent={true}
             >
               <div className="space-y-6">
                 <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 text-xs text-slate-600">
@@ -664,10 +955,14 @@ const App: React.FC = () => {
                 ) : (
                   <button
                     onClick={startPreprocess}
-                    disabled={stepStatuses.preprocess === 'running' || !profile.name || !lastUploadedFilename}
+                    disabled={
+                      stepStatuses.preprocess === 'running' ||
+                      !profile.name ||
+                      (!lastUploadedFilename && !(currentProfileInfo?.raw_files && currentProfileInfo.raw_files > 0))
+                    }
                     className="w-full py-4 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition-all flex items-center justify-center gap-3 shadow-xl shadow-teal-600/20"
                   >
-                    {stepStatuses.preprocess === 'running' ? 'Processing Pipeline...' : 'Commence Preprocessing'}
+                    {stepStatuses.preprocess === 'running' ? 'Processing Pipeline...' : 'Begin Preprocessing'}
                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>
                   </button>
                 )}
@@ -683,6 +978,12 @@ const App: React.FC = () => {
               description="Fine-tune StyleTTS2 with your settings and flags."
               status={stepStatuses.train}
               isActive={true}
+              statusSteps={trainSteps}
+              statusNote="Training runs on GPU. Early-stop finishes once the sweet spot is detected."
+              progress={trainDisplayProgress}
+              activeStepIndex={stepStatuses.train === 'running' ? trainStageIndex : null}
+              statusContent={trainingStatusCard}
+              showStepsWithContent={true}
             >
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="md:col-span-1 bg-slate-50 p-6 rounded-2xl border border-slate-100 space-y-6">
@@ -754,32 +1055,6 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="md:col-span-2 space-y-4">
-                  {trainStats ? (
-                    <div className="bg-amber-50 border-2 border-amber-200 p-6 rounded-2xl space-y-4">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <p className="text-[10px] font-bold text-amber-700 uppercase">Training Progress</p>
-                          <p className="text-3xl font-bold text-slate-900">{((trainStats.currentEpoch / trainStats.totalEpochs) * 100).toFixed(0)}%</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-[10px] font-bold text-amber-700 uppercase">Time Remaining</p>
-                          <p className="text-lg font-bold text-slate-800">{trainStats.eta}</p>
-                        </div>
-                      </div>
-                      <div className="h-4 bg-amber-200 rounded-full overflow-hidden">
-                        <div className="h-full bg-amber-600 transition-all duration-700" style={{ width: `${(trainStats.currentEpoch / trainStats.totalEpochs) * 100}%` }}></div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-4 text-xs font-bold">
-                        <div className="bg-white p-2 rounded border border-amber-100">GPU: {trainStats.gpuMemory}</div>
-                        <div className="bg-white p-2 rounded border border-amber-100">Steps: {trainStats.steps.toLocaleString()}</div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="h-full bg-slate-50 border-2 border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center text-slate-400">
-                      <svg className="w-12 h-12 mb-2 opacity-20" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" /></svg>
-                      <p className="text-sm font-bold">Waiting to start session</p>
-                    </div>
-                  )}
                   <LogPanel logs={trainLogs} title="StyleTTS2 Local Worker Output" />
                 </div>
               </div>
@@ -793,6 +1068,10 @@ const App: React.FC = () => {
               description="Stream voice-only or voice + lip sync with chunked playback."
               status={stepStatuses.inference}
               isActive={true}
+              statusSteps={inferenceSteps}
+              statusNote="First request warms the model. Subsequent requests are near-instant."
+              progress={inferenceDisplayProgress}
+              activeStepIndex={stepStatuses.inference === 'running' ? inferenceStageIndex : null}
             >
               <div className="space-y-6">
                 <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_1.4fr] gap-6 items-stretch">
@@ -809,7 +1088,8 @@ const App: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => setOutputMode('avatar')}
-                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${outputMode === 'avatar' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 text-slate-500'}`}
+                        disabled={profileType === 'voice'}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${outputMode === 'avatar' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 text-slate-500'} ${profileType === 'voice' ? 'opacity-40 cursor-not-allowed' : ''}`}
                       >
                         Voice + Lip Sync
                       </button>

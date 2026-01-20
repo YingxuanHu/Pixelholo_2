@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from lipsync_bridge import LipSyncBridge
+from src.lipsync_bridge import LipSyncBridge
 
 warnings.filterwarnings(
     "ignore",
@@ -44,7 +44,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STYLE_TTS2_DIR = PROJECT_ROOT / "lib" / "StyleTTS2"
 
 sys.path.append(str(PROJECT_ROOT))
-from config import processed_wavs_dir, raw_videos_dir  # noqa: E402
+from config import (  # noqa: E402
+    PROFILE_TYPE_AVATAR,
+    PROFILE_TYPE_VOICE,
+    OUTPUTS_DIR,
+    profile_data_root,
+    processed_wavs_dir,
+    raw_videos_dir,
+    resolve_dataset_root,
+    resolve_training_dir,
+    TRAINING_DIRNAME,
+    training_root,
+)
 
 if STYLE_TTS2_DIR.exists():
     sys.path.insert(0, str(STYLE_TTS2_DIR))
@@ -308,7 +319,7 @@ def _first_wav(directory: Path | None) -> Path | None:
     return None
 
 
-def _resolve_ref_wav(ref_wav_path: str | None, speaker: str | None) -> Path:
+def _resolve_ref_wav(ref_wav_path: str | None, speaker: str | None, profile_type: str | None) -> Path:
     if ref_wav_path:
         path = Path(ref_wav_path).expanduser()
         if path.exists():
@@ -330,12 +341,14 @@ def _resolve_ref_wav(ref_wav_path: str | None, speaker: str | None) -> Path:
         raise HTTPException(status_code=400, detail=f"No wav files in STYLE_TTS2_REF_DIR: {env_dir}")
 
     if speaker:
-        candidate = _first_wav(PROJECT_ROOT / "data" / speaker / "processed_wavs")
+        candidate = _first_wav(processed_wavs_dir(speaker, profile_type))
         if candidate:
             return candidate
 
     data_root = PROJECT_ROOT / "data"
-    processed_dirs = sorted(data_root.glob("*/processed_wavs"))
+    processed_dirs = sorted(data_root.glob("*/*/processed_wavs")) + sorted(
+        data_root.glob("*/processed_wavs")
+    )
     if len(processed_dirs) == 1:
         candidate = _first_wav(processed_dirs[0])
         if candidate:
@@ -350,7 +363,11 @@ def _resolve_ref_wav(ref_wav_path: str | None, speaker: str | None) -> Path:
     )
 
 
-def _resolve_model_path(model_path: str | None, speaker: str | None) -> Path:
+def _resolve_model_path(
+    model_path: str | None,
+    speaker: str | None,
+    profile_type: str | None,
+) -> Path:
     if model_path:
         candidate = Path(model_path).expanduser()
         if candidate.exists():
@@ -365,7 +382,7 @@ def _resolve_model_path(model_path: str | None, speaker: str | None) -> Path:
         raise HTTPException(status_code=400, detail=f"STYLE_TTS2_MODEL not found: {candidate}")
 
     if speaker:
-        training_dir = PROJECT_ROOT / "outputs" / "training" / speaker
+        training_dir = resolve_training_dir(speaker, profile_type)
         best_path = training_dir / "best_epoch.txt"
         if best_path.exists():
             content = best_path.read_text().strip()
@@ -380,40 +397,50 @@ def _resolve_model_path(model_path: str | None, speaker: str | None) -> Path:
     raise HTTPException(status_code=400, detail="model_path is required")
 
 
-def _list_profiles() -> list[dict[str, object]]:
-    data_root = PROJECT_ROOT / "data"
-    training_root = PROJECT_ROOT / "outputs" / "training"
-    names = set()
-    if data_root.exists():
-        names.update([p.name for p in data_root.iterdir() if p.is_dir()])
-    if training_root.exists():
-        names.update([p.name for p in training_root.iterdir() if p.is_dir()])
+def _list_profiles(profile_type: str | None) -> list[dict[str, object]]:
+    types = [profile_type] if profile_type else [PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR]
     profiles: list[dict[str, object]] = []
-    for name in sorted(names):
-        data_dir = data_root / name
-        training_dir = training_root / name
-        raw_count = len(list((data_dir / "raw_videos").glob("*"))) if data_dir.exists() else 0
-        processed_count = len(list((data_dir / "processed_wavs").glob("*.wav"))) if data_dir.exists() else 0
-        profile_json = training_dir / "profile.json"
-        best_epoch = None
-        best_path = training_dir / "best_epoch.txt"
-        if best_path.exists():
-            content = best_path.read_text().strip()
-            if content:
-                best_epoch = content
-        checkpoints = sorted(training_dir.glob("epoch_2nd_*.pth")) if training_dir.exists() else []
-        latest_ckpt = str(checkpoints[-1]) if checkpoints else None
-        profiles.append(
-            {
-                "name": name,
-                "has_data": data_dir.exists(),
-                "raw_files": raw_count,
-                "processed_wavs": processed_count,
-                "has_profile": profile_json.exists(),
-                "best_checkpoint": best_epoch,
-                "latest_checkpoint": latest_ckpt,
-            }
-        )
+    legacy_training_root = OUTPUTS_DIR / TRAINING_DIRNAME
+    for ptype in types:
+        data_root = profile_data_root(ptype)
+        training_root_dir = training_root(ptype)
+        names: set[str] = set()
+        if data_root.exists():
+            names.update([p.name for p in data_root.iterdir() if p.is_dir()])
+        if training_root_dir.exists():
+            names.update([p.name for p in training_root_dir.iterdir() if p.is_dir()])
+        if ptype == PROFILE_TYPE_VOICE and legacy_training_root.exists():
+            names.update([p.name for p in legacy_training_root.iterdir() if p.is_dir()])
+        for name in sorted(names):
+            data_dir = data_root / name
+            training_dir = training_root_dir / name
+            if not training_dir.exists():
+                legacy_dir = legacy_training_root / name
+                if legacy_dir.exists():
+                    training_dir = legacy_dir
+            raw_count = len(list((data_dir / "raw_videos").glob("*"))) if data_dir.exists() else 0
+            processed_count = len(list((data_dir / "processed_wavs").glob("*.wav"))) if data_dir.exists() else 0
+            profile_json = training_dir / "profile.json"
+            best_epoch = None
+            best_path = training_dir / "best_epoch.txt"
+            if best_path.exists():
+                content = best_path.read_text().strip()
+                if content:
+                    best_epoch = content
+            checkpoints = sorted(training_dir.glob("epoch_2nd_*.pth")) if training_dir.exists() else []
+            latest_ckpt = str(checkpoints[-1]) if checkpoints else None
+            profiles.append(
+                {
+                    "name": name,
+                    "profile_type": ptype,
+                    "has_data": data_dir.exists(),
+                    "raw_files": raw_count,
+                    "processed_wavs": processed_count,
+                    "has_profile": profile_json.exists() or bool(checkpoints),
+                    "best_checkpoint": best_epoch,
+                    "latest_checkpoint": latest_ckpt,
+                }
+            )
     return profiles
 
 
@@ -477,7 +504,12 @@ def _resolve_phonemizer_lang(model_path: Path, req: "GenerateRequest") -> str:
     return os.getenv("STYLE_TTS2_LANG", DEFAULT_LANG)
 
 
-def _resolve_lexicon_path(model_path: Path, req: "GenerateRequest", speaker: str | None) -> Path | None:
+def _resolve_lexicon_path(
+    model_path: Path,
+    req: "GenerateRequest",
+    speaker: str | None,
+    profile_type: str | None,
+) -> Path | None:
     if req.lexicon_path:
         return Path(req.lexicon_path).expanduser()
     profile = _load_profile_defaults(model_path)
@@ -487,11 +519,13 @@ def _resolve_lexicon_path(model_path: Path, req: "GenerateRequest", speaker: str
     if env_path:
         return Path(env_path).expanduser()
     if speaker:
-        candidate = PROJECT_ROOT / "data" / speaker / "lexicon.json"
+        candidate = resolve_dataset_root(speaker, profile_type) / "lexicon.json"
         if candidate.exists():
             return candidate
     data_root = PROJECT_ROOT / "data"
-    processed_dirs = sorted(data_root.glob("*/processed_wavs"))
+    processed_dirs = sorted(data_root.glob("*/*/processed_wavs")) + sorted(
+        data_root.glob("*/processed_wavs")
+    )
     if len(processed_dirs) == 1:
         candidate = processed_dirs[0].parent / "lexicon.json"
         if candidate.exists():
@@ -554,6 +588,7 @@ class GenerateRequest(BaseModel):
     config_path: str | None = None
     ref_wav_path: str | None = None
     speaker: str | None = None
+    profile_type: str | None = None
     phonemizer_lang: str | None = None
     lexicon_path: str | None = None
     alpha: float | None = None
@@ -580,7 +615,8 @@ class GenerateRequest(BaseModel):
 
 class PreprocessRequest(BaseModel):
     profile: str
-    filename: str
+    filename: str | None = None
+    profile_type: str | None = None
     bake_avatar: bool = True
     avatar_fps: float | None = None
     avatar_loop_sec: float | None = None
@@ -593,6 +629,7 @@ class PreprocessRequest(BaseModel):
 
 class TrainRequest(BaseModel):
     profile: str
+    profile_type: str | None = None
     batch_size: int | None = None
     epochs: int | None = None
     max_len: int | None = None
@@ -956,17 +993,21 @@ def _startup() -> None:
 
 
 @app.get("/profiles")
-def profiles():
-    return {"profiles": _list_profiles()}
+def profiles(profile_type: str | None = None):
+    return {"profiles": _list_profiles(profile_type)}
 
 
 @app.post("/upload")
-def upload(profile: str = Form(...), file: UploadFile = File(...)):
+def upload(
+    profile: str = Form(...),
+    file: UploadFile = File(...),
+    profile_type: str = Form(PROFILE_TYPE_VOICE),
+):
     if not profile:
         raise HTTPException(status_code=400, detail="profile is required")
     if not file.filename:
         raise HTTPException(status_code=400, detail="file is required")
-    dest_dir = raw_videos_dir(profile)
+    dest_dir = raw_videos_dir(profile, profile_type)
     dest_dir.mkdir(parents=True, exist_ok=True)
     filename = Path(file.filename).name
     dest_path = dest_dir / filename
@@ -980,7 +1021,18 @@ def preprocess(req: PreprocessRequest):
     profile = req.profile.strip()
     if not profile:
         raise HTTPException(status_code=400, detail="profile is required")
-    video_path = raw_videos_dir(profile) / req.filename
+    profile_type = req.profile_type or PROFILE_TYPE_VOICE
+    raw_dir = raw_videos_dir(profile, profile_type)
+    filename = req.filename
+    if not filename:
+        if not raw_dir.exists():
+            raise HTTPException(status_code=400, detail="No raw uploads found for profile.")
+        candidates = sorted(raw_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not candidates:
+            raise HTTPException(status_code=400, detail="No raw uploads found for profile.")
+        filename = candidates[0].name
+        print(f"Auto-selected raw upload: {filename}", flush=True)
+    video_path = raw_dir / filename
     if not video_path.exists():
         raise HTTPException(status_code=400, detail=f"file not found: {video_path}")
     command = [
@@ -990,8 +1042,10 @@ def preprocess(req: PreprocessRequest):
         str(video_path),
         "--name",
         profile,
+        "--profile_type",
+        profile_type,
     ]
-    if not req.bake_avatar:
+    if not req.bake_avatar or profile_type == PROFILE_TYPE_VOICE:
         command.append("--no_bake_avatar")
     if req.avatar_fps is not None:
         command += ["--avatar_fps", str(req.avatar_fps)]
@@ -1018,7 +1072,8 @@ def train(req: TrainRequest):
     profile = req.profile.strip()
     if not profile:
         raise HTTPException(status_code=400, detail="profile is required")
-    dataset_path = PROJECT_ROOT / "data" / profile
+    profile_type = req.profile_type or PROFILE_TYPE_VOICE
+    dataset_path = resolve_dataset_root(profile, profile_type)
     if not dataset_path.exists():
         raise HTTPException(status_code=400, detail=f"dataset not found: {dataset_path}")
     command = [
@@ -1026,6 +1081,8 @@ def train(req: TrainRequest):
         str(PROJECT_ROOT / "src" / "train.py"),
         "--dataset_path",
         str(dataset_path),
+        "--profile_type",
+        profile_type,
     ]
     if req.batch_size:
         command += ["--batch_size", str(req.batch_size)]
@@ -1052,12 +1109,13 @@ def train(req: TrainRequest):
 @app.post("/stream")
 def stream(req: GenerateRequest):
     start_time = time.perf_counter()
-    model_path = _resolve_model_path(req.model_path, req.speaker)
+    profile_type = req.profile_type or PROFILE_TYPE_VOICE
+    model_path = _resolve_model_path(req.model_path, req.speaker, profile_type)
     config_path = _resolve_config_path(model_path, req.config_path)
-    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker)
+    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type)
     params = _resolve_inference_params(model_path, req)
     phonemizer_lang = _resolve_phonemizer_lang(model_path, req)
-    lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker)
+    lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker, profile_type)
     lexicon = _load_lexicon(lexicon_path)
 
     engine = _get_engine(model_path, config_path)
@@ -1178,17 +1236,21 @@ def stream_avatar(req: GenerateRequest):
     if not profile:
         raise HTTPException(status_code=400, detail="profile is required")
 
-    model_path = _resolve_model_path(req.model_path, profile)
+    profile_type = req.profile_type or PROFILE_TYPE_AVATAR
+    model_path = _resolve_model_path(req.model_path, profile, profile_type)
     config_path = _resolve_config_path(model_path, req.config_path)
-    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, profile)
+    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, profile, profile_type)
     params = _resolve_inference_params(model_path, req)
     phonemizer_lang = _resolve_phonemizer_lang(model_path, req)
-    lexicon_path = _resolve_lexicon_path(model_path, req, profile)
+    lexicon_path = _resolve_lexicon_path(model_path, req, profile, profile_type)
     lexicon = _load_lexicon(lexicon_path)
 
     engine = _get_engine(model_path, config_path)
-    lipsync = _get_lipsync_engine()
-    lipsync.load_profile(profile)
+    try:
+        lipsync = _get_lipsync_engine()
+        lipsync.load_profile(profile, profile_type)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     fps = req.avatar_fps or lipsync.fps
 
     profile_defaults = _load_profile_defaults(model_path)
@@ -1317,13 +1379,14 @@ def stream_avatar(req: GenerateRequest):
 @app.post("/generate")
 def generate(req: GenerateRequest):
     start_time = time.perf_counter()
-    model_path = _resolve_model_path(req.model_path, req.speaker)
+    profile_type = req.profile_type or PROFILE_TYPE_VOICE
+    model_path = _resolve_model_path(req.model_path, req.speaker, profile_type)
 
     config_path = _resolve_config_path(model_path, req.config_path)
-    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker)
+    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type)
     params = _resolve_inference_params(model_path, req)
     phonemizer_lang = _resolve_phonemizer_lang(model_path, req)
-    lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker)
+    lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker, profile_type)
     lexicon = _load_lexicon(lexicon_path)
 
     try:

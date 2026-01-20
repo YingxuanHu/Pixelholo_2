@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 import librosa
@@ -9,8 +10,12 @@ import soundfile as sf
 import torch
 import yaml
 
-from config import inference_audio_dir
-from inference import StyleTTS2RepoEngine
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import PROFILE_TYPE_AVATAR, PROFILE_TYPE_VOICE, inference_audio_dir  # noqa: E402
+from src.inference import StyleTTS2RepoEngine  # noqa: E402
 
 _EPOCH_RE = re.compile(r"epoch_2nd_(\d+)", re.IGNORECASE)
 
@@ -786,7 +791,9 @@ def main() -> None:
     print(f"Wrote {results_path}")
 
     if args.save_best and best_audio is not None:
-        out_dir = inference_audio_dir(training_dir.name)
+        parent_type = training_dir.parent.name
+        profile_type = parent_type if parent_type in (PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR) else PROFILE_TYPE_VOICE
+        out_dir = inference_audio_dir(training_dir.name, profile_type)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{Path(best['checkpoint']).stem}_best.wav"
         sf.write(out_path, best_audio, 24000)

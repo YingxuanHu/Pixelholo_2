@@ -31,7 +31,10 @@ from config import (  # noqa: E402
     DEFAULT_MIN_SPEECH_RATIO,
     METADATA_FILENAME,
     PROCESSED_WAVS_DIRNAME,
+    PROFILE_TYPE_AVATAR,
+    PROFILE_TYPE_VOICE,
     STYLE_TTS2_DIR,
+    training_dir,
 )
 
 
@@ -292,6 +295,12 @@ def main() -> None:
     parser.add_argument("--styletts2_dir", type=Path, default=STYLE_TTS2_DIR, help="Path to StyleTTS2 repo")
     parser.add_argument("--base_config", type=Path, help="Base StyleTTS2 config to patch")
     parser.add_argument("--output_dir", type=Path, help="Output directory for checkpoints/logs")
+    parser.add_argument(
+        "--profile_type",
+        choices=[PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR],
+        default=PROFILE_TYPE_VOICE,
+        help="Profile type to organize training outputs.",
+    )
     parser.add_argument("--batch_size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--max_len", type=int, default=DEFAULT_MAX_LEN)
     parser.add_argument("--fp16_run", type=bool, default=DEFAULT_FP16)
@@ -418,7 +427,7 @@ def main() -> None:
     parser.add_argument(
         "--auto_build_lexicon",
         action="store_true",
-        help="After training, generate data/<profile>/lexicon.json from metadata.csv.",
+        help="After training, generate data/<type>/<profile>/lexicon.json from metadata.csv.",
     )
     parser.add_argument("--lexicon_lang", type=str, default="en-ca", help="Phonemizer language for lexicon")
     parser.add_argument("--lexicon_min_count", type=int, default=1, help="Minimum word count for lexicon")
@@ -446,7 +455,7 @@ def main() -> None:
     if not meta_path.exists():
         raise FileNotFoundError(f"metadata.csv not found at {meta_path}")
 
-    output_dir = args.output_dir or (PROJECT_ROOT / "outputs" / "training" / args.dataset_path.name)
+    output_dir = args.output_dir or training_dir(args.dataset_path.name, args.profile_type)
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -584,6 +593,8 @@ def main() -> None:
             str(lex_script),
             "--profile",
             args.dataset_path.name,
+            "--profile_type",
+            args.profile_type,
             "--lang",
             args.lexicon_lang,
             "--min_count",

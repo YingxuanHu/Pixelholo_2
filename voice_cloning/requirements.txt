@@ -6,7 +6,9 @@ ffmpeg-python
 pydub
 fastapi
 uvicorn
+python-multipart
 numpy
+scipy
 pyyaml
 librosa
 phonemizer
@@ -14,5 +16,14 @@ nltk
 soundfile
 transformers
 resemblyzer
-scipy
 opencv-python
+click
+tensorboard
+munch
+pandas
+matplotlib
+accelerate
+einops
+einops-exts
+tqdm
+git+https://github.com/resemble-ai/monotonic_align.git

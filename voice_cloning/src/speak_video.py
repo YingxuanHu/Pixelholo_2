@@ -8,11 +8,18 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import DATA_DIR, inference_audio_dir, inference_video_dir
+from config import (
+    PROFILE_TYPE_AVATAR,
+    PROFILE_TYPE_VOICE,
+    inference_audio_dir,
+    inference_video_dir,
+    raw_videos_dir,
+    resolve_dataset_root,
+)
 
 
-def _find_latest_video(profile: str) -> Path | None:
-    raw_dir = DATA_DIR / profile / "raw_videos"
+def _find_latest_video(profile: str, profile_type: str) -> Path | None:
+    raw_dir = raw_videos_dir(profile, profile_type)
     if not raw_dir.exists():
         return None
     candidates = [p for p in raw_dir.iterdir() if p.is_file()]
@@ -31,7 +38,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate speech with StyleTTS2, then lip-sync it to a profile video."
     )
-    parser.add_argument("--profile", required=True, help="Profile name (data/<profile>).")
+    parser.add_argument("--profile", required=True, help="Profile name.")
+    parser.add_argument(
+        "--profile_type",
+        choices=(PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR),
+        default=PROFILE_TYPE_AVATAR,
+        help="Profile type to load data from.",
+    )
     parser.add_argument("--text", required=True, help="Text to synthesize.")
     parser.add_argument("--video", type=Path, default=None, help="Override source video path.")
     parser.add_argument("--audio_out", type=Path, default=None, help="Override output wav path.")
@@ -82,18 +95,18 @@ def main() -> None:
     # Pass-through args to speak.py (e.g., --pitch_shift, --phonemizer_lang)
     args, extra = parser.parse_known_args()
 
-    profile_dir = DATA_DIR / args.profile
+    profile_dir = resolve_dataset_root(args.profile, args.profile_type)
     if not profile_dir.exists():
         raise FileNotFoundError(f"Profile not found: {profile_dir}")
 
-    video_path = args.video or _find_latest_video(args.profile)
+    video_path = args.video or _find_latest_video(args.profile, args.profile_type)
     if video_path is None or not video_path.exists():
         raise FileNotFoundError(
             "No source video found. Provide --video or run preprocess.py with a video."
         )
 
-    audio_dir = inference_audio_dir(args.profile)
-    video_dir = inference_video_dir(args.profile)
+    audio_dir = inference_audio_dir(args.profile, args.profile_type)
+    video_dir = inference_video_dir(args.profile, args.profile_type)
     audio_dir.mkdir(parents=True, exist_ok=True)
     video_dir.mkdir(parents=True, exist_ok=True)
 
@@ -106,6 +119,8 @@ def main() -> None:
         str(speak_py),
         "--profile",
         args.profile,
+        "--profile_type",
+        args.profile_type,
         "--text",
         args.text,
         "--out",

@@ -3,9 +3,15 @@ import json
 import re
 from collections import Counter
 from pathlib import Path
+import sys
 
 import phonemizer
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import PROFILE_TYPE_AVATAR, PROFILE_TYPE_VOICE, resolve_dataset_root
 
 WORD_RE = re.compile(r"[A-Za-z']+")
 
@@ -29,17 +35,23 @@ def _load_metadata(metadata_path: Path) -> list[str]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build a default lexicon.json for a profile.")
-    parser.add_argument("--profile", help="Profile name (uses data/<profile>/metadata.csv).")
+    parser.add_argument("--profile", help="Profile name (uses data/<type>/<profile>/metadata.csv).")
+    parser.add_argument(
+        "--profile_type",
+        choices=[PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR],
+        default=PROFILE_TYPE_VOICE,
+        help="Profile type to read data from.",
+    )
     parser.add_argument("--metadata", type=Path, help="Path to metadata.csv.")
     parser.add_argument("--lang", default="en-ca", help="Phonemizer language (default: en-ca).")
     parser.add_argument("--min_count", type=int, default=1, help="Only include words seen N times.")
     parser.add_argument("--output", type=Path, help="Output lexicon.json path.")
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parents[1]
     if args.profile:
-        metadata_path = project_root / "data" / args.profile / "metadata.csv"
-        output_path = project_root / "data" / args.profile / "lexicon.json"
+        profile_root = resolve_dataset_root(args.profile, args.profile_type)
+        metadata_path = profile_root / "metadata.csv"
+        output_path = profile_root / "lexicon.json"
     elif args.metadata:
         metadata_path = args.metadata
         output_path = metadata_path.parent / "lexicon.json"

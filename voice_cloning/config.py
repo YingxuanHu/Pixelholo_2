@@ -13,6 +13,11 @@ RAW_VIDEOS_DIRNAME = "raw_videos"
 PROCESSED_WAVS_DIRNAME = "processed_wavs"
 METADATA_FILENAME = "metadata.csv"
 AVATAR_CACHE_DIRNAME = "avatar_cache"
+VOICE_PROFILE_DIRNAME = "voice_profiles"
+AVATAR_PROFILE_DIRNAME = "avatar_profiles"
+TRAINING_DIRNAME = "training"
+PROFILE_TYPE_VOICE = "voice"
+PROFILE_TYPE_AVATAR = "avatar"
 
 DEFAULT_SAMPLE_RATE = 24000
 DEFAULT_F_MAX = 8000
@@ -46,29 +51,76 @@ DEFAULT_EPOCHS = 25
 STYLE_TTS2_DIR = BASE_DIR / "lib" / "StyleTTS2"
 
 
-def dataset_root(speaker_name: str) -> Path:
-    return DATA_DIR / speaker_name
+def _normalize_profile_type(profile_type: str | None) -> str:
+    if profile_type == PROFILE_TYPE_AVATAR:
+        return PROFILE_TYPE_AVATAR
+    return PROFILE_TYPE_VOICE
 
 
-def raw_videos_dir(speaker_name: str) -> Path:
-    return dataset_root(speaker_name) / RAW_VIDEOS_DIRNAME
+def dataset_root(speaker_name: str, profile_type: str | None = None) -> Path:
+    normalized = _normalize_profile_type(profile_type)
+    if normalized == PROFILE_TYPE_AVATAR:
+        return DATA_DIR / AVATAR_PROFILE_DIRNAME / speaker_name
+    return DATA_DIR / VOICE_PROFILE_DIRNAME / speaker_name
 
 
-def processed_wavs_dir(speaker_name: str) -> Path:
-    return dataset_root(speaker_name) / PROCESSED_WAVS_DIRNAME
+def resolve_dataset_root(speaker_name: str, profile_type: str | None = None) -> Path:
+    if profile_type:
+        return dataset_root(speaker_name, profile_type)
+    for base in (DATA_DIR / VOICE_PROFILE_DIRNAME, DATA_DIR / AVATAR_PROFILE_DIRNAME, DATA_DIR):
+        candidate = base / speaker_name
+        if candidate.exists():
+            return candidate
+    return dataset_root(speaker_name, PROFILE_TYPE_VOICE)
 
 
-def metadata_path(speaker_name: str) -> Path:
-    return dataset_root(speaker_name) / METADATA_FILENAME
+def profile_data_root(profile_type: str | None = None) -> Path:
+    normalized = _normalize_profile_type(profile_type)
+    if normalized == PROFILE_TYPE_AVATAR:
+        return DATA_DIR / AVATAR_PROFILE_DIRNAME
+    return DATA_DIR / VOICE_PROFILE_DIRNAME
 
 
-def avatar_cache_dir(speaker_name: str) -> Path:
-    return dataset_root(speaker_name) / AVATAR_CACHE_DIRNAME
+def raw_videos_dir(speaker_name: str, profile_type: str | None = None) -> Path:
+    return dataset_root(speaker_name, profile_type) / RAW_VIDEOS_DIRNAME
 
 
-def inference_audio_dir(profile: str) -> Path:
-    return OUTPUTS_DIR / INFERENCE_AUDIO_DIRNAME / profile
+def processed_wavs_dir(speaker_name: str, profile_type: str | None = None) -> Path:
+    return dataset_root(speaker_name, profile_type) / PROCESSED_WAVS_DIRNAME
 
 
-def inference_video_dir(profile: str) -> Path:
-    return OUTPUTS_DIR / INFERENCE_VIDEO_DIRNAME / profile
+def metadata_path(speaker_name: str, profile_type: str | None = None) -> Path:
+    return dataset_root(speaker_name, profile_type) / METADATA_FILENAME
+
+
+def avatar_cache_dir(speaker_name: str, profile_type: str | None = None) -> Path:
+    return dataset_root(speaker_name, profile_type) / AVATAR_CACHE_DIRNAME
+
+
+def training_root(profile_type: str | None = None) -> Path:
+    normalized = _normalize_profile_type(profile_type)
+    return OUTPUTS_DIR / TRAINING_DIRNAME / normalized
+
+
+def training_dir(profile: str, profile_type: str | None = None) -> Path:
+    return training_root(profile_type) / profile
+
+
+def resolve_training_dir(profile: str, profile_type: str | None = None) -> Path:
+    if profile_type:
+        return training_dir(profile, profile_type)
+    for base in (training_root(PROFILE_TYPE_VOICE), training_root(PROFILE_TYPE_AVATAR), OUTPUTS_DIR / TRAINING_DIRNAME):
+        candidate = base / profile
+        if candidate.exists():
+            return candidate
+    return training_dir(profile, PROFILE_TYPE_VOICE)
+
+
+def inference_audio_dir(profile: str, profile_type: str | None = None) -> Path:
+    normalized = _normalize_profile_type(profile_type)
+    return OUTPUTS_DIR / INFERENCE_AUDIO_DIRNAME / normalized / profile
+
+
+def inference_video_dir(profile: str, profile_type: str | None = None) -> Path:
+    normalized = _normalize_profile_type(profile_type)
+    return OUTPUTS_DIR / INFERENCE_VIDEO_DIRNAME / normalized / profile

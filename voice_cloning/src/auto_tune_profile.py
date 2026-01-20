@@ -1,13 +1,19 @@
 import argparse
 import json
 from pathlib import Path
+import sys
 
 import librosa
 import numpy as np
 import soundfile as sf
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import PROFILE_TYPE_AVATAR, PROFILE_TYPE_VOICE, resolve_dataset_root, resolve_training_dir
 from config import inference_audio_dir
-from inference import StyleTTS2RepoEngine
+from src.inference import StyleTTS2RepoEngine
 
 DEFAULT_PROBE_TEXTS = [
     "Hello, this is a quick pitch calibration sample.",
@@ -355,7 +361,13 @@ def _rank_reference_wavs(ref_dir: Path) -> list[Path]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Auto-tune inference params for a profile.")
-    parser.add_argument("--profile", help="Profile name (uses outputs/training/<profile>).")
+    parser.add_argument("--profile", help="Profile name.")
+    parser.add_argument(
+        "--profile_type",
+        choices=[PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR],
+        default=PROFILE_TYPE_VOICE,
+        help="Profile type to load data from.",
+    )
     parser.add_argument("--model_path", type=Path, help="Override model checkpoint path.")
     parser.add_argument("--config_path", type=Path, help="Override config path.")
     parser.add_argument("--ref_wav", type=Path, help="Reference wav for tuning.")
@@ -459,13 +471,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parents[1]
     training_dir = None
     profile_dir = None
 
     if args.profile:
-        training_dir = project_root / "outputs" / "training" / args.profile
-        profile_dir = project_root / "data" / args.profile
+        training_dir = resolve_training_dir(args.profile, args.profile_type)
+        profile_dir = resolve_dataset_root(args.profile, args.profile_type)
     elif args.model_path:
         training_dir = args.model_path.parent
 
@@ -669,7 +680,9 @@ def main() -> None:
     print(f"Saved f0_scale: {f0_path}")
 
     if args.save_best and best_audio is not None:
-        out_dir = inference_audio_dir(model_path.parent.name)
+        parent_type = model_path.parent.parent.name
+        profile_type = parent_type if parent_type in (PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR) else PROFILE_TYPE_VOICE
+        out_dir = inference_audio_dir(model_path.parent.name, profile_type)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{model_path.stem}_best.wav"
         sf.write(out_path, best_audio, sr)

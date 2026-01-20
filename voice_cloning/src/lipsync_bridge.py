@@ -1,3 +1,4 @@
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -6,7 +7,7 @@ import cv2
 import numpy as np
 import torch
 
-from config import LIP_SYNCING_DIR, avatar_cache_dir
+from config import LIP_SYNCING_DIR, PROFILE_TYPE_AVATAR, avatar_cache_dir
 
 
 class LipSyncBridge:
@@ -28,12 +29,39 @@ class LipSyncBridge:
         lip_dir = LIP_SYNCING_DIR / "lib" / "Wav2Lip"
         if not lip_dir.exists():
             raise FileNotFoundError(f"Wav2Lip repo not found at {lip_dir}")
-        sys.path.insert(0, str(lip_dir))
-        from models import Wav2Lip  # type: ignore
-        import audio as wav2lip_audio  # type: ignore
+        hparams_path = lip_dir / "hparams.py"
+        if not hparams_path.exists():
+            raise FileNotFoundError(f"Wav2Lip hparams not found at {hparams_path}")
+        hparams_spec = importlib.util.spec_from_file_location("hparams", hparams_path)
+        if hparams_spec is None or hparams_spec.loader is None:
+            raise ImportError("Failed to create module spec for Wav2Lip hparams.")
+        hparams_module = importlib.util.module_from_spec(hparams_spec)
+        sys.modules["hparams"] = hparams_module
+        hparams_spec.loader.exec_module(hparams_module)
+
+        models_init = lip_dir / "models" / "__init__.py"
+        if not models_init.exists():
+            raise FileNotFoundError(f"Wav2Lip models not found at {models_init}")
+        models_spec = importlib.util.spec_from_file_location(
+            "wav2lip_models",
+            models_init,
+            submodule_search_locations=[str(lip_dir / "models")],
+        )
+        if models_spec is None or models_spec.loader is None:
+            raise ImportError("Failed to create module spec for Wav2Lip models.")
+        wav2lip_models = importlib.util.module_from_spec(models_spec)
+        sys.modules["wav2lip_models"] = wav2lip_models
+        models_spec.loader.exec_module(wav2lip_models)
+
+        audio_spec = importlib.util.spec_from_file_location("wav2lip_audio", lip_dir / "audio.py")
+        if audio_spec is None or audio_spec.loader is None:
+            raise ImportError("Failed to create module spec for Wav2Lip audio.")
+        wav2lip_audio = importlib.util.module_from_spec(audio_spec)
+        sys.modules["wav2lip_audio"] = wav2lip_audio
+        audio_spec.loader.exec_module(wav2lip_audio)
 
         self._wav_audio = wav2lip_audio
-        self.model = Wav2Lip().to(self.device)
+        self.model = wav2lip_models.Wav2Lip().to(self.device)
 
         ckpt = checkpoint_path or (LIP_SYNCING_DIR / "models" / "wav2lip_gan.pth")
         if not ckpt.exists():
@@ -43,8 +71,8 @@ class LipSyncBridge:
         self.model.load_state_dict(state)
         self.model.eval()
 
-    def load_profile(self, profile: str) -> None:
-        cache_dir = avatar_cache_dir(profile)
+    def load_profile(self, profile: str, profile_type: str = PROFILE_TYPE_AVATAR) -> None:
+        cache_dir = avatar_cache_dir(profile, profile_type)
         frames_path = cache_dir / "frames.npy"
         coords_path = cache_dir / "coords.npy"
         meta_path = cache_dir / "meta.json"

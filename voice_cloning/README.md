@@ -2,6 +2,16 @@
 
 Local StyleTTS2 fine-tuning plus FastAPI streaming inference. This service also drives lip sync by calling the sibling `lip_syncing/` repo when requested.
 
+## TL;DR Quickstart
+```bash
+cd /home/alvin/PixelHolo_trial/voice_cloning
+source .venv/bin/activate
+python src/preprocess.py --video /path/to/user.mp4 --name alice --profile_type voice
+python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type voice
+python src/speak.py --profile alice --text "Hello"
+python src/speak_video.py --profile alice --profile_type avatar --text "Hello from video"
+```
+
 ## Requirements
 - System deps: `ffmpeg`, `espeak-ng`
 - Python 3.12
@@ -33,6 +43,8 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(python -c "import sysconfig; print(sys
 
 ## Project layout
 - `data/` - datasets per profile
+  - `data/voice_profiles/<profile>/` - audio-only
+  - `data/avatar_profiles/<profile>/` - video-enabled (avatar cache)
 - `outputs/training/` - checkpoints and logs
 - `outputs/audio/` - generated wav (per profile)
 - `outputs/video/` - generated mp4 (per profile)
@@ -44,7 +56,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(python -c "import sysconfig; print(sys
 ### 1) Preprocess
 Splits the input video into clean clips, transcribes them, and writes `metadata.csv`. It also bakes the avatar cache used by lip sync.
 ```bash
-python src/preprocess.py --video /path/to/user.mp4 --name alice
+python src/preprocess.py --video /path/to/user.mp4 --name alice --profile_type voice
 ```
 Notes:
 - Default preprocessing uses HP/LP filters and stricter text filtering.
@@ -53,20 +65,20 @@ Notes:
 
 ### 2) Train
 ```bash
-python src/train.py --dataset_path ./data/alice
+python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type voice
 ```
 Common overrides:
 ```bash
-python src/train.py --dataset_path ./data/alice   --batch_size 2 --max_len 200
+python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type voice   --batch_size 2 --max_len 200
 ```
 Optional auto tools:
 ```bash
-python src/train.py --dataset_path ./data/alice   --auto_tune_profile   --auto_select_epoch   --auto_build_lexicon
+python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type voice   --auto_tune_profile   --auto_select_epoch   --auto_build_lexicon
 ```
 
 ### 3) Inference (audio)
 ```bash
-python src/speak.py --profile alice --text "Hello world"
+python src/speak.py --profile alice --profile_type voice --text "Hello world"
 ```
 
 ### 4) Inference (voice + lip sync)
@@ -77,7 +89,7 @@ Requires the sibling repo:
 and the Wav2Lip models in `lip_syncing/models/`.
 
 ```bash
-python src/speak_video.py --profile alice --text "Hello from video"
+python src/speak_video.py --profile alice --profile_type avatar --text "Hello from video"
 ```
 
 ## API server
@@ -132,3 +144,10 @@ Endpoints:
 - If `profile.json` exists, it provides default model path, ref wav, and tuning parameters.
 - `auto_select_epoch` writes `best_epoch.txt` and `epoch_scores.json` in the training folder.
 - If no ref wav is provided, the script auto-picks a clean clip from `processed_wavs`.
+
+
+## Troubleshooting
+- **CUDA/cuDNN load errors**: install `nvidia-cublas-cu12` and `nvidia-cudnn-cu12`, then export `LD_LIBRARY_PATH` as described above.
+- **BERT length errors**: lower `--max_text_chars` or `--max_text_words`.
+- **OOM**: reduce `--batch_size` and `--max_len`.
+- **Lip sync missing**: ensure `lip_syncing/` exists as a sibling and models are in `lip_syncing/models/`.

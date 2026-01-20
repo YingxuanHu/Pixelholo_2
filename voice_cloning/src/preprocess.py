@@ -28,6 +28,8 @@ from config import (  # noqa: E402
     DEFAULT_MIN_SPEECH_RATIO,
     DEFAULT_SAMPLE_RATE,
     DEFAULT_VAD_FILTER,
+    PROFILE_TYPE_AVATAR,
+    PROFILE_TYPE_VOICE,
     KEEP_SILENCE_MS,
     MAX_CHUNK_SEC,
     MIN_CHUNK_SEC,
@@ -39,7 +41,7 @@ from config import (  # noqa: E402
     raw_videos_dir,
 )
 
-from avatar_bake import bake_avatar
+from avatar_bake import bake_avatar as bake_avatar_cache
 
 
 def _run_ffmpeg_extract(video_path: Path, wav_path: Path, denoise: bool) -> None:
@@ -225,6 +227,7 @@ def _chunk_is_usable(
 def process_video(
     video_path: Path,
     speaker_name: str,
+    profile_type: str = PROFILE_TYPE_VOICE,
     model_size: str = DEFAULT_MODEL_SIZE,
     device: str = DEFAULT_DEVICE,
     compute_type: str = DEFAULT_COMPUTE_TYPE,
@@ -253,10 +256,10 @@ def process_video(
         if not quiet:
             print(message, flush=True)
 
-    dataset_root = raw_videos_dir(speaker_name).parent
-    raw_dir = raw_videos_dir(speaker_name)
-    wavs_dir = processed_wavs_dir(speaker_name)
-    meta_path = metadata_path(speaker_name)
+    dataset_root = raw_videos_dir(speaker_name, profile_type).parent
+    raw_dir = raw_videos_dir(speaker_name, profile_type)
+    wavs_dir = processed_wavs_dir(speaker_name, profile_type)
+    meta_path = metadata_path(speaker_name, profile_type)
 
     raw_dir.mkdir(parents=True, exist_ok=True)
     wavs_dir.mkdir(parents=True, exist_ok=True)
@@ -265,11 +268,12 @@ def process_video(
     if video_path.resolve() != copied_video.resolve():
         shutil.copy2(video_path, copied_video)
 
-    if bake_avatar:
+    if bake_avatar and profile_type == PROFILE_TYPE_AVATAR:
         _log("Baking avatar cache for lip-sync...")
-        bake_avatar(
+        bake_avatar_cache(
             profile=speaker_name,
             video_path=copied_video,
+            profile_type=profile_type,
             fps=avatar_fps,
             loop_sec=avatar_loop_sec,
             resize_factor=avatar_resize_factor,
@@ -432,6 +436,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Process a video into StyleTTS2-ready chunks.")
     parser.add_argument("--video", required=True, type=Path, help="Path to input video (.mp4)")
     parser.add_argument("--name", required=True, help="Speaker name")
+    parser.add_argument(
+        "--profile_type",
+        choices=[PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR],
+        default=PROFILE_TYPE_VOICE,
+        help="Profile type to organize data (voice or avatar).",
+    )
     parser.add_argument("--model_size", default=DEFAULT_MODEL_SIZE, help="faster-whisper model size")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help="Device for faster-whisper")
     parser.add_argument("--compute_type", default=DEFAULT_COMPUTE_TYPE, help="Compute type for faster-whisper")
@@ -464,6 +474,7 @@ def main() -> None:
     meta_path = process_video(
         video_path=args.video,
         speaker_name=args.name,
+        profile_type=args.profile_type,
         model_size=args.model_size,
         device=args.device,
         compute_type=args.compute_type,

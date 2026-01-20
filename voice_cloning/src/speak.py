@@ -12,8 +12,14 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from config import inference_audio_dir
-from inference import StyleTTS2RepoEngine
+from config import (
+    PROFILE_TYPE_AVATAR,
+    PROFILE_TYPE_VOICE,
+    inference_audio_dir,
+    resolve_dataset_root,
+    resolve_training_dir,
+)
+from src.inference import StyleTTS2RepoEngine
 
 
 def _find_latest_checkpoint(training_dir: Path) -> Path | None:
@@ -286,7 +292,13 @@ def _fade_edges(audio: np.ndarray, sample_rate: int, fade_ms: float = 5.0) -> np
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="One-step local inference (no server).")
-    parser.add_argument("--profile", help="Profile name (uses outputs/training/<profile>).")
+    parser.add_argument("--profile", help="Profile name.")
+    parser.add_argument(
+        "--profile_type",
+        choices=[PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR],
+        default=PROFILE_TYPE_VOICE,
+        help="Profile type to load data from.",
+    )
     parser.add_argument("--model_path", type=Path, help="Override model checkpoint path.")
     parser.add_argument("--config_path", type=Path, help="Override config path.")
     parser.add_argument("--ref_wav", type=Path, help="Reference wav path.")
@@ -379,8 +391,8 @@ def main() -> None:
     profile_dir = None
 
     if args.profile:
-        training_dir = project_root / "outputs" / "training" / args.profile
-        profile_dir = project_root / "data" / args.profile
+        training_dir = resolve_training_dir(args.profile, args.profile_type)
+        profile_dir = resolve_dataset_root(args.profile, args.profile_type)
     elif args.model_path:
         training_dir = args.model_path.parent
 
@@ -499,7 +511,7 @@ def main() -> None:
     out_path = args.out
     if out_path is None:
         profile_name = args.profile or "manual"
-        profile_out_dir = inference_audio_dir(profile_name)
+        profile_out_dir = inference_audio_dir(profile_name, args.profile_type)
         profile_out_dir.mkdir(parents=True, exist_ok=True)
         out_path = profile_out_dir / f"{model_path.stem}_speak.wav"
 
