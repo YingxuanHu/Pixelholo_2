@@ -1,193 +1,134 @@
-# Voice Clone 5090
+# Voice Cloning (StyleTTS2)
 
-Local StyleTTS2 fine-tuning + FastAPI inference pipeline.
+Local StyleTTS2 fine-tuning plus FastAPI streaming inference. This service also drives lip sync by calling the sibling `lip_syncing/` repo when requested.
 
-## Prereqs
-- System deps: `espeak-ng` and `ffmpeg` (phonemizer + audio tooling).
-- GPU: NVIDIA RTX 5090 (recommended, but CUDA-capable GPU works).
+## Requirements
+- System deps: `ffmpeg`, `espeak-ng`
+- Python 3.12
+- NVIDIA GPU recommended
 
-## Optional venv (recommended)
+## Setup
 ```bash
+cd /home/alvin/PixelHolo_trial/voice_cloning
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## CUDA libs for faster-whisper (if using pip cuDNN/cuBLAS)
-If `faster-whisper` fails to load cuDNN, point `LD_LIBRARY_PATH` at the pip-installed libs:
+Clone StyleTTS2 and download LibriTTS weights:
+```bash
+mkdir -p lib
+cd lib
+git clone https://github.com/yl4579/StyleTTS2.git
+mkdir -p StyleTTS2/Models/LibriTTS
+wget -O StyleTTS2/Models/LibriTTS/epochs_2nd_00020.pth   https://huggingface.co/yl4579/StyleTTS2-LibriTTS/resolve/main/Models/LibriTTS/epochs_2nd_00020.pth
+wget -O StyleTTS2/Models/LibriTTS/config.yml   https://huggingface.co/yl4579/StyleTTS2-LibriTTS/resolve/main/Models/LibriTTS/config.yml
+```
+
+If `faster-whisper` fails to load cuDNN from pip packages:
 ```bash
 pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")/nvidia/cudnn/lib:$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")/nvidia/cublas/lib
 ```
-To make it automatic per project, add it to the venv activation script:
-```bash
-cat >> .venv/bin/activate <<'EOF'
-VENV_SITE_PACKAGES=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$VENV_SITE_PACKAGES/nvidia/cudnn/lib:$VENV_SITE_PACKAGES/nvidia/cublas/lib"
-EOF
-```
 
 ## Project layout
-- `data/` dataset outputs per speaker
-- `outputs/training/` checkpoints and logs
-- `outputs/audio/` generated audio files (per profile)
-- `outputs/video/` generated lip-sync video files (per profile)
-- `src/` core scripts
-- `config.py` shared settings
+- `data/` - datasets per profile
+- `outputs/training/` - checkpoints and logs
+- `outputs/audio/` - generated wav (per profile)
+- `outputs/video/` - generated mp4 (per profile)
+- `src/` - core scripts
+- `config.py` - shared settings
 
-## Usage
+## Workflow (end-to-end)
+
+### 1) Preprocess
+Splits the input video into clean clips, transcribes them, and writes `metadata.csv`. It also bakes the avatar cache used by lip sync.
 ```bash
-# 1) Preprocess video into chunks + metadata.csv
-python src/preprocess.py --video /path/to/user.mp4 --name name1
-# This also bakes avatar frames/coords for lip-sync (can disable with --no_bake_avatar).
-# Defaults: VAD + HP/LP filters + stricter text filtering (language=en). No afftdn denoise.
-# Optional preprocessing tweaks:
-# python src/preprocess.py --video /path/to/user.mp4 --name name1 --denoise
-# python src/preprocess.py --video /path/to/user.mp4 --name name1 --min_words 2 --min_avg_logprob -1.0
+python src/preprocess.py --video /path/to/user.mp4 --name alice
+```
+Notes:
+- Default preprocessing uses HP/LP filters and stricter text filtering.
+- Denoise is optional (`--denoise`).
+- Avatar baking can be disabled with `--no_bake_avatar`.
 
-# 2) Fine-tune StyleTTS2
-# Clone StyleTTS2 into ./lib/StyleTTS2 before training.
-# Download the LibriTTS pretrained checkpoint + config into the repo:
-# mkdir -p lib/StyleTTS2/Models/LibriTTS
-# wget -O lib/StyleTTS2/Models/LibriTTS/epochs_2nd_00020.pth \
-#   https://huggingface.co/yl4579/StyleTTS2-LibriTTS/resolve/main/Models/LibriTTS/epochs_2nd_00020.pth
-# wget -O lib/StyleTTS2/Models/LibriTTS/config.yml \
-#   https://huggingface.co/yl4579/StyleTTS2-LibriTTS/resolve/main/Models/LibriTTS/config.yml
-python src/train.py --dataset_path ./data/name1
-# If you hit CUDA OOM, start with smaller settings:
-# python src/train.py --dataset_path ./data/name1 --batch_size 2 --max_len 200
-# Accent overfit run (new output dir, higher epochs, lower batch):
-# python src/train.py --dataset_path ./data/name1 --output_dir ./outputs/training/name1_accent --epochs 50 --batch_size 4 --max_len 500
-# Recommended: auto-tune inference + select best epoch (all checkpoints) + build lexicon
-# python src/train.py --dataset_path ./data/name1 \
-#   --auto_tune_profile --tune_ref_wav ./data/name1/processed_wavs/name1_0001.wav \
-#   --auto_select_epoch --select_ref_wav ./data/name1/processed_wavs/name1_0001.wav \
-#   --auto_build_lexicon --lexicon_lang en-ca
-# If you omit the reference wav flags, train.py auto-picks a clean, low-pitch, longer clip from processed_wavs.
-# Thorough selection/tuning is now the default when auto-tuning/selecting.
-# To force a faster (single-ref/single-text) pass:
-# python src/train.py --dataset_path ./data/name1 \
-#   --auto_tune_profile --tune_quick \
-#   --auto_select_epoch --select_quick \
-#   --auto_build_lexicon --lexicon_lang en-ca
-
-# 3) One-step inference (no server)
-python src/speak.py --profile name1 --text "Hello, this is a test."
-
-# 3b) One-step lip-synced video (voice + lips)
-# Requires the separate lip_syncing repo (sibling to voice_cloning):
-# /home/alvin/PixelHolo_trial/lip_syncing
-# Make sure models are present in lip_syncing/models (wav2lip_gan.pth, s3fd.pth).
-python src/speak_video.py --profile name1 --text "Hello from video."
-# If lip_syncing has its own venv:
-# python src/speak_video.py --profile name1 --text "Hello" \
-#   --lipsync_python ../lip_syncing/.venv/bin/python
-
-# 4) Optional: run the API
-# export STYLE_TTS2_MODEL=/path/to/your/model.pth
-# export STYLE_TTS2_CONFIG=/path/to/config_ft.yml
-# export STYLE_TTS2_REF_WAV=/path/to/reference.wav
-# uvicorn src.inference:app --reload
-# curl -X POST "http://localhost:8000/generate" \
-#   -H "Content-Type: application/json" \
-#   -d '{"text":"Hello, I am now digital.","ref_wav_path":"/path/to/reference.wav"}'
+### 2) Train
+```bash
+python src/train.py --dataset_path ./data/alice
+```
+Common overrides:
+```bash
+python src/train.py --dataset_path ./data/alice   --batch_size 2 --max_len 200
+```
+Optional auto tools:
+```bash
+python src/train.py --dataset_path ./data/alice   --auto_tune_profile   --auto_select_epoch   --auto_build_lexicon
 ```
 
+### 3) Inference (audio)
+```bash
+python src/speak.py --profile alice --text "Hello world"
+```
+
+### 4) Inference (voice + lip sync)
+Requires the sibling repo:
+```
+/home/alvin/PixelHolo_trial/lip_syncing
+```
+and the Wav2Lip models in `lip_syncing/models/`.
+
+```bash
+python src/speak_video.py --profile alice --text "Hello from video"
+```
+
+## API server
+```bash
+uvicorn src.inference:app --host 0.0.0.0 --port 8000
+```
+
+Endpoints:
+- `POST /stream` - audio only (NDJSON)
+- `POST /stream_avatar` - audio + JPEG frames (NDJSON)
+- `POST /generate` - full WAV
+
 ## Flag reference (common)
+
 ### Preprocess (`src/preprocess.py`)
-- `--video`: input video path.
-- `--name`: profile name (writes into `data/<name>/`).
-- `--language`: Whisper language (default `en`).
-- `--denoise`: optional flag; preprocessing always applies HP/LP filters (no afftdn).
-- `--min_words`: drop segments with fewer words (default 4).
-- `--min_speech_ratio`: drop clips with too much silence (default 0.6).
-- `--min_avg_logprob`: drop low-confidence segments (default -0.5).
-- `--max_no_speech_prob`: drop likely non-speech segments (default 0.4).
-- `--merge_gap_sec`: merge adjacent segments within this gap.
-- `--legacy_split`: use silence splitting before transcription.
-- `--quiet`: reduce logs.
-- Long segments are split and re-transcribed into smaller clips.
+- `--video` input path
+- `--name` profile name (creates `data/<name>/`)
+- `--language` Whisper language (default `en`)
+- `--denoise` optional
+- `--min_words`, `--min_speech_ratio`, `--min_avg_logprob`, `--max_no_speech_prob`
+- `--no_bake_avatar` to skip lip sync cache
+- `--avatar_fps`, `--avatar_loop_sec`, `--avatar_resize_factor`, `--avatar_pads`
 
 ### Train (`src/train.py`)
-- `--dataset_path`: profile dataset (e.g., `./data/name1`).
-- `--output_dir`: override checkpoint output folder.
-- `--epochs`, `--batch_size`, `--max_len`, `--grad_accum_steps`: training knobs.
-- `--max_text_chars`, `--max_text_words`: drop overly long transcripts to avoid BERT limits.
-- Early stop: training writes `epoch_stats.json` (val/dur/f0) and stops early when it hits the sweet-spot range or overfits. Adjust thresholds in `outputs/training/<profile>/config_ft.yml` under `early_stop`.
-- `--auto_tune_profile`: writes `profile.json` (auto alpha/beta/steps/scale/f0).
-- `--auto_select_epoch`: writes `best_epoch.txt` + `epoch_scores.json` (evaluates all epochs unless `--select_limit` is set).
-- `--select_stats_min_epoch`: ignore early epoch stats during selection.
-- `--select_overfit_floor_factor`: reject epochs with val_loss below median * factor.
-- `--auto_build_lexicon`: writes `data/<name>/lexicon.json`.
-- `--lexicon_lang`: language code for lexicon generation (defaults to `en-ca`).
-- `--tune_ref_wav` / `--select_ref_wav`: reference wav for tuning/selection.
-- `--tune_ref_dir` / `--select_ref_dir`: directory of reference wavs (prefers clean, low-pitch clips).
-- `--tune_ref_count` / `--select_ref_count`: how many refs to evaluate (default 1).
-- `--tune_probe_texts` / `--select_probe_texts`: text file with one prompt per line.
-- `--tune_thorough` / `--select_thorough`: use multiple refs + multiple prompts (slower, more stable).
-- `--tune_quick` / `--select_quick`: force single-ref/single-text quick pass.
-- `--use_resemblyzer`: re-rank top-quality epochs by speaker similarity.
-- `--quality_top_n`: number of top-quality epochs to compare (default 5).
-- `--identity_margin`: prefer earlier epoch within this similarity margin.
-- `--tune_target_f0_hz`: target median F0 for deeper/shallower voices.
-- If no reference wav is provided, the script auto-picks one from `processed_wavs`.
-- If both auto-select and auto-tune are enabled, auto-tune uses the chosen best epoch.
+- `--dataset_path` input dataset
+- `--output_dir` override training output
+- `--epochs`, `--batch_size`, `--max_len`, `--grad_accum_steps`
+- `--max_text_chars`, `--max_text_words` to avoid BERT limits
+- `--auto_tune_profile`, `--auto_select_epoch`, `--auto_build_lexicon`
+- `--tune_ref_wav`, `--select_ref_wav` to force a reference
+- `--tune_thorough`, `--select_thorough` for multi-ref scoring
+- `--tune_quick`, `--select_quick` for a fast pass
+- `--lexicon_lang` to build a per-profile lexicon
 
 ### Inference (`src/speak.py`)
-- `--profile`: use `outputs/training/<profile>` + `data/<profile>`.
-- `--text`: text to synthesize.
-- `--ref_wav`: override reference wav.
-- `--phonemizer_lang`: accent locale (e.g., `en-ca`, `en-us`, `en-gb`, `en-au`, `en-in`).
-- `--lexicon_path`: per-word pronunciation overrides (defaults to `data/<profile>/lexicon.json` if present).
-- `--max_chunk_chars` / `--max_chunk_words`: auto-split long text to avoid BERT token limits.
-- `--pause_ms`: silence inserted between chunks.
-- `--pitch_shift`: semitone shift post-process (negative = deeper voice).
-- `--de_esser_cutoff`: apply a gentle low-pass de-esser at this cutoff Hz (0 disables).
-- `--de_esser_order`: filter order for de-esser (default 2).
-- `--seed`: deterministic generation (default 1234); use `--no_seed` to disable.
-API requests can also pass `max_chunk_chars`, `max_chunk_words`, and `pause_ms` to control chunking.
-
-### Streaming video (`/stream_avatar`)
-- Request body matches `/stream` plus: `avatar_profile` and optional `avatar_fps`.
-- Returns NDJSON with audio chunks + base64 JPEG frames per chunk.
+- `--profile`, `--text`
+- `--ref_wav` override
+- `--phonemizer_lang` accent (e.g., `en-ca`, `en-us`, `en-gb`)
+- `--max_chunk_chars`, `--max_chunk_words`, `--pause_ms`
+- `--pitch_shift`, `--de_esser_cutoff`, `--de_esser_order`
+- `--seed` for deterministic output
 
 ### Video inference (`src/speak_video.py`)
-- `--profile`: voice profile to use.
-- `--text`: text to synthesize.
-- `--video`: optional override for source video (default: latest in `data/<profile>/raw_videos`).
-- `--lipsync_mode`: `chunked` (fast start) or `lib` (single-pass cached).
-- `--lipsync_dir`: path to the `lip_syncing` repo (default: sibling).
-- `--lipsync_python`: python executable for lip_syncing venv (optional).
-- Chunked options: `--chunk_sec`, `--resize_factor`, `--fourcc`, `--face_det_batch_size`, `--wav2lip_batch_size`, `--pads`, `--concat_mode`.
+- `--profile`, `--text`
+- `--video` optional override
+- `--lipsync_dir` path to `lip_syncing` (default sibling)
+- `--lipsync_python` optional venv python
+- Chunked options: `--chunk_sec`, `--resize_factor`, `--fourcc`, `--face_det_batch_size`, `--wav2lip_batch_size`, `--pads`, `--concat_mode`
 
 ## Notes
-- `src/train.py` patches a StyleTTS2 config and launches the finetune script.
-- Training now defaults `spect_params.f_max` to 8000 Hz when missing, to reduce high-frequency sharpness.
-- `src/inference.py` caches the model in memory for low latency.
-- `src/auto_tune_profile.py` writes `profile.json` next to a checkpoint with tuned defaults.
-- `profile.json` now also stores model/config/ref paths plus chunking + post-processing defaults.
-- Auto-tuning adapts alpha/beta if pitch correlation is low or timbre similarity is too high.
-- It also reduces embedding/diffusion when centroid_ratio is too bright (sharpness).
-- If `profile.json` or `f0_scale.txt` exist next to a model, inference will use them automatically.
-- `src/auto_select_epoch.py` scores checkpoints and writes `best_epoch.txt`.
-- Selection prefers earlier epochs within a score margin (disable with `--no_prefer_earlier`).
-- If `epoch_stats.json` exists, selection also penalizes epochs outside the sweet-spot loss ranges.
-- Optional: add `--use_resemblyzer` to rank top-quality epochs by speaker similarity (requires `pip install resemblyzer`).
-- Epoch scoring now also penalizes noisy outputs (flatness/ZCR) and low harmonicity.
-- `src/auto_tune_profile.py` now also writes `f0_scale.txt` for downstream tools.
-- `src/build_lexicon.py` generates `lexicon.json` from metadata.
-
-## Accent overrides (optional)
-- Set `phonemizer_lang` per request or in `profile.json` (examples: `en`, `en-gb`, `en-au`, `en-in`).
-- Add a lexicon at `data/<profile>/lexicon.json` or pass `lexicon_path`:
-  ```json
-  {
-    "water": "w ɔː t əɹ",
-    "about": "əˈbæʊt"
-  }
-  ```
-  Values should be espeak-style phonemes (same format produced by the phonemizer).
-- Generate a default lexicon from your metadata:
-  ```bash
-  python src/build_lexicon.py --profile name1 --lang en-ca
-  ```
+- `profile.json` is stored next to the chosen checkpoint and is used by `speak.py`.
+- If `profile.json` exists, it provides default model path, ref wav, and tuning parameters.
+- `auto_select_epoch` writes `best_epoch.txt` and `epoch_scores.json` in the training folder.
+- If no ref wav is provided, the script auto-picks a clean clip from `processed_wavs`.

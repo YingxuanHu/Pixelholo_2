@@ -1,40 +1,43 @@
-# Lip Syncing (Chunked Wav2Lip CLI)
+# Lip Syncing (Wav2Lip)
 
-This repo adds a terminal-first lip-sync pipeline that works **in chunks**, similar to the voice_cloning flow.
+Chunked and single-pass Wav2Lip runners for PixelHolo. This repo can be used standalone or driven by `voice_cloning/src/speak_video.py`.
 
 ## Layout
-- `lib/Wav2Lip/` — Wav2Lip repo (clone here)
-- `models/` — Wav2Lip checkpoints
-- `outputs/` — generated chunks + final video
-- `src/chunked_lipsync.py` — chunked CLI runner
+- `lib/Wav2Lip/` - Wav2Lip repo (clone here)
+- `models/` - Wav2Lip checkpoints
+- `src/chunked_lipsync.py` - chunked runner
+- `src/run_lipsync.py` - wrapper (extract audio + run chunked)
+- `outputs/` - generated results
+
+## Requirements
+- Python 3.12
+- CUDA GPU recommended
+- `ffmpeg` installed
 
 ## Setup
 ```bash
-# 1) Create venv (optional)
-python3.12 -m venv .venv
+cd /home/alvin/PixelHolo_trial/lip_syncing
+python -m venv .venv
 source .venv/bin/activate
-
-# 2) Install deps
 pip install -r requirements.txt
+```
 
-# 3) Install GPU Torch (RTX 5090 / CUDA 12.8)
+Install GPU Torch (RTX 5090 / CUDA 12.8):
+```bash
 pip install --upgrade pip
-pip install torch==2.9.1+cu128 torchvision==0.24.1+cu128 \
-  --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.9.1+cu128 torchvision==0.24.1+cu128   --index-url https://download.pytorch.org/whl/cu128
+```
 
-# 4) Clone Wav2Lip
+Clone Wav2Lip:
+```bash
 git clone https://github.com/Rudrabha/Wav2Lip.git lib/Wav2Lip
 ```
 
-## GPU notes (RTX 5090)
-Wav2Lip needs a modern PyTorch build for RTX 5090 (sm_120). Use the CUDA 12.8 wheels shown above.
-
 ## Model downloads
-Download these files and place them in `lip_syncing/models/`:
-
-- Face detection pre-trained model:
+Place these files in `lip_syncing/models/`:
+- `s3fd-619a316812.pth`
   - https://www.adrianbulat.com/downloads/python-fan/s3fd-619a316812.pth
-- Wav2Lip GAN checkpoint:
+- `wav2lip_gan.pth`
   - https://drive.google.com/drive/folders/1I-0dNLfFOSFwrfqjNa-SXuwaURHE5K4k
 
 Expected folder:
@@ -47,56 +50,31 @@ lip_syncing/
 
 ## Run (chunked)
 ```bash
-python src/chunked_lipsync.py \
-  --video /path/to/source_video.mp4 \
-  --audio /path/to/generated_audio.wav \
-  --output outputs/lipsync_out.mp4 \
-  --chunk_sec 1.0 \
-  --loop_sec 10 \
-  --fps 25 \
-  --resize_factor 2
+python src/chunked_lipsync.py   --video /path/to/source_video.mp4   --audio /path/to/generated_audio.wav   --output outputs/lipsync_out.mp4   --chunk_sec 1.0   --loop_sec 10   --fps 25   --resize_factor 2
 ```
 
-## Run (one-shot wrapper)
+## Run (wrapper)
 Extracts audio from the input video, runs chunked lipsync, and writes `outputs/<video>_lipsync.mp4`.
 ```bash
-python src/run_lipsync.py \
-  --video /path/to/source_video.mp4 \
-  --resize_factor 2
+python src/run_lipsync.py   --video /path/to/source_video.mp4   --resize_factor 2
 ```
 
-## Run (PixelHolo-style single-pass)
-(Optional dependency: `pip install lipsync==0.1.0` — uses PyAV, may fail on ffmpeg 8.)
-Uses the `lipsync` library (Wav2Lip wrapper) the same way PixelHolo does: load once,
-cache face detections, and run a single pass over the full video.
+## Run from voice_cloning
+`voice_cloning/src/speak_video.py` calls this repo automatically. Example:
 ```bash
-python src/run_lipsync_lib.py \
-  --video /path/to/source_video.mp4 \
-  --output outputs/lipsync_out.mp4 \
-  --checkpoint models/wav2lip_gan.pth \
-  --cache_dir outputs/cache \
-  --save_cache \
-  --nosmooth
+python /home/alvin/PixelHolo_trial/voice_cloning/src/speak_video.py   --profile alice   --text "Hello"
 ```
-Notes:
-- This path is **not chunked**. It trades latency for simpler, stable output.
-- If your input is HDR, tone-mapping runs automatically. Disable with `--no_tonemap`.
 
-Quality tips:
-- For sharper output, try `--resize_factor 1` (heavier GPU).
-- If you hit GPU OOM, use `--face_det_batch_size 4 --wav2lip_batch_size 64`.
-- Tweak mouth crop with `--pads "0 20 0 0"` to include more chin/lip area.
-- Use `--fourcc MJPG` for higher-quality intermediate frames.
-- For best final quality, use `--concat_mode copy` (no re-encode). If that fails, switch to
-  `--concat_mode reencode --concat_crf 18 --concat_preset slow`.
-- Preserve input quality during looping/chunking with:
-  `--loop_crf 18 --loop_preset slow --chunk_crf 18 --chunk_preset slow`.
-- If your source is HDR (iPhone HLG), the wrapper will auto-tone-map to SDR.
-  Disable with `--no_tonemap`.
-- Control Wav2Lip output compression with:
-  `--wav2lip_crf 18 --wav2lip_preset slow`.
+## Quality tips
+- Sharper output: `--resize_factor 1` (heavier GPU)
+- If you hit OOM: `--face_det_batch_size 4 --wav2lip_batch_size 64`
+- Adjust mouth crop: `--pads "0 20 0 0"`
+- Higher quality intermediate frames: `--fourcc MJPG`
+- For best final quality: `--concat_mode copy`
+- Preserve input quality during looping/chunking:
+  `--loop_crf 18 --loop_preset slow --chunk_crf 18 --chunk_preset slow`
+- If source is HDR (iPhone HLG), tone-mapping is applied automatically in the wrapper.
 
 ## Notes
-- Wav2Lip expects **16 kHz mono** audio. The script resamples per chunk.
-- Chunking is for low-latency testing. It stitches small Wav2Lip outputs into one video.
-- For best quality, start with a **loopable, stable head pose** video.
+- Wav2Lip expects 16 kHz mono audio; the script resamples per chunk.
+- Chunking is for low-latency testing and streaming.
