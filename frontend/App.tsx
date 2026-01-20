@@ -75,11 +75,19 @@ const App: React.FC = () => {
   const [latency, setLatency] = useState<{ ttfa: number; total: number } | null>(null);
   const [modelOverride, setModelOverride] = useState('');
   const [refOverride, setRefOverride] = useState('');
+  const [outputMode, setOutputMode] = useState<'voice' | 'avatar'>('voice');
+  const [videoState, setVideoState] = useState<'idle' | 'buffering' | 'playing'>('idle');
+  const [videoFps, setVideoFps] = useState(25);
+  const [videoQueue, setVideoQueue] = useState(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const streamAbortRef = useRef<AbortController | null>(null);
   const warmedProfilesRef = useRef<Set<string>>(new Set());
+  const videoCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const videoTimerRef = useRef<number | null>(null);
+  const videoFpsRef = useRef<number>(25);
+  const frameQueueRef = useRef<string[]>([]);
 
   useEffect(() => {
     const cached = localStorage.getItem('voxclone_api_base');
@@ -89,6 +97,10 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('voxclone_api_base', apiBase);
   }, [apiBase]);
+
+  useEffect(() => {
+    videoFpsRef.current = videoFps;
+  }, [videoFps]);
 
   const loadProfiles = useCallback(async () => {
     setProfilesStatus('loading');
@@ -312,6 +324,62 @@ const App: React.FC = () => {
     nextStartTimeRef.current = 0;
   };
 
+  const resetVideo = useCallback(() => {
+    if (videoTimerRef.current !== null) {
+      window.clearInterval(videoTimerRef.current);
+      videoTimerRef.current = null;
+    }
+    frameQueueRef.current = [];
+    setVideoQueue(0);
+    setVideoState('idle');
+    const canvas = videoCanvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }, []);
+
+  const drawFrame = useCallback((frameBase64: string) => {
+    const canvas = videoCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    };
+    img.src = `data:image/jpeg;base64,${frameBase64}`;
+  }, []);
+
+  const startVideoLoop = useCallback(() => {
+    if (videoTimerRef.current !== null) return;
+    const fps = Math.max(5, videoFpsRef.current || 25);
+    const intervalMs = Math.max(1000 / fps, 16);
+    videoTimerRef.current = window.setInterval(() => {
+      const nextFrame = frameQueueRef.current.shift();
+      if (!nextFrame) {
+        if (videoState === 'playing') setVideoState('buffering');
+        setVideoQueue(frameQueueRef.current.length);
+        return;
+      }
+      if (videoState !== 'playing') setVideoState('playing');
+      drawFrame(nextFrame);
+      setVideoQueue(frameQueueRef.current.length);
+    }, intervalMs);
+  }, [drawFrame, videoState]);
+
+  const enqueueFrames = useCallback((frames: string[], fps?: number) => {
+    if (!frames || frames.length === 0) return;
+    if (fps && fps > 0) {
+      setVideoFps(fps);
+      videoFpsRef.current = fps;
+    }
+    frameQueueRef.current.push(...frames);
+    setVideoQueue(frameQueueRef.current.length);
+    if (videoState === 'idle') setVideoState('buffering');
+    startVideoLoop();
+  }, [startVideoLoop, videoState]);
+
   const scheduleBuffer = (buffer: AudioBuffer) => {
     if (!audioContextRef.current) return;
     const ctx = audioContextRef.current;
@@ -348,6 +416,7 @@ const App: React.FC = () => {
   const startInference = useCallback(async () => {
     if (!profile.name || !inferenceText) return;
     await ensureAudioContext();
+    resetVideo();
     setStepStatuses(prev => ({ ...prev, inference: 'running' }));
     setInferenceChunks([]);
     setLatency(null);
@@ -362,15 +431,19 @@ const App: React.FC = () => {
     const startTime = performance.now();
     let firstChunk = true;
 
-    const payload = {
+    const payload: Record<string, any> = {
       speaker: profile.name,
       text: inferenceText,
       model_path: modelOverride || null,
       ref_wav_path: refOverride || null,
     };
+    if (outputMode === 'avatar') {
+      payload.avatar_profile = profile.name;
+    }
 
     try {
-      const res = await fetch(`${apiBase}/stream`, {
+      const endpoint = outputMode === 'avatar' ? '/stream_avatar' : '/stream';
+      const res = await fetch(`${apiBase}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -389,6 +462,9 @@ const App: React.FC = () => {
           firstChunk = false;
           setLatency({ ttfa: Math.round(performance.now() - startTime), total: 0 });
         }
+        if (outputMode === 'avatar' && Array.isArray(data.frames_base64)) {
+          enqueueFrames(data.frames_base64, data.fps);
+        }
         const binary = atob(data.audio_base64);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i += 1) {
@@ -403,11 +479,12 @@ const App: React.FC = () => {
         setStepStatuses(prev => ({ ...prev, inference: 'error' }));
       }
     }
-  }, [apiBase, inferenceText, modelOverride, profile.name, refOverride]);
+  }, [apiBase, enqueueFrames, inferenceText, modelOverride, outputMode, profile.name, refOverride, resetVideo]);
 
   const stopInference = async () => {
     if (streamAbortRef.current) streamAbortRef.current.abort();
     await resetAudio();
+    resetVideo();
     setStepStatuses(prev => ({ ...prev, inference: 'idle' }));
   };
 
@@ -712,12 +789,49 @@ const App: React.FC = () => {
           {activeStep === 4 && (
             <StepCard
               stepNumber={4}
-              title="Real-time Voice Generation"
-              description="Stream audio as soon as the first chunk is ready."
+              title="Real-time Generation"
+              description="Stream voice-only or voice + lip sync with chunked playback."
               status={stepStatuses.inference}
               isActive={true}
             >
               <div className="space-y-6">
+                <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_1.4fr] gap-6 items-stretch">
+                  <div className="bg-white border border-slate-100 rounded-2xl p-5 space-y-4">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Output Mode</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setOutputMode('voice')}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${outputMode === 'voice' ? 'bg-teal-600 text-white shadow-lg shadow-teal-600/20' : 'bg-slate-100 text-slate-500'}`}
+                      >
+                        Voice Only
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setOutputMode('avatar')}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${outputMode === 'avatar' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 text-slate-500'}`}
+                      >
+                        Voice + Lip Sync
+                      </button>
+                    </div>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Lip sync uses the baked avatar frames from preprocessing. Upload a portrait video for best results.
+                    </p>
+                  </div>
+                  <div className={`bg-slate-950 border border-slate-900 rounded-2xl p-4 flex flex-col ${outputMode === 'avatar' ? '' : 'opacity-40'}`}>
+                    <div className="flex items-center justify-between text-xs text-slate-300">
+                      <span className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Avatar Preview</span>
+                      <span className="text-[10px] font-bold text-teal-300">{outputMode === 'avatar' ? `${videoFps} FPS · ${videoQueue} queued` : 'disabled'}</span>
+                    </div>
+                    <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[240px]">
+                      <canvas ref={videoCanvasRef} width={480} height={480} className="w-full h-full" />
+                    </div>
+                    <div className="mt-3 text-[11px] text-slate-400 flex items-center justify-between">
+                      <span>Status: <span className="font-semibold text-slate-200">{videoState}</span></span>
+                      <span>Queue: <span className="font-semibold text-slate-200">{videoQueue}</span></span>
+                    </div>
+                  </div>
+                </div>
                 <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 text-xs text-slate-600">
                   <p className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Defaults</p>
                   <p>Profile: <span className="font-semibold">{profile.name || '—'}</span></p>
@@ -751,7 +865,7 @@ const App: React.FC = () => {
                       disabled={!inferenceText || stepStatuses.inference === 'running'}
                       className="bg-teal-600 hover:bg-teal-700 disabled:bg-slate-200 text-white font-bold px-6 py-2.5 rounded-xl transition-all shadow-lg shadow-teal-600/20 flex items-center gap-2"
                     >
-                      {stepStatuses.inference === 'running' ? 'Streaming...' : 'Stream Voice'}
+                      {stepStatuses.inference === 'running' ? 'Streaming...' : outputMode === 'avatar' ? 'Stream Avatar' : 'Stream Voice'}
                       <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd"></path></svg>
                     </button>
                   </div>
@@ -785,8 +899,8 @@ const App: React.FC = () => {
 
                 <div className="bg-slate-50 border border-slate-100 rounded-2xl p-6">
                   <div className="flex items-center justify-between mb-4">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Low-Latency Audio Queue</p>
-                    <span className="text-[10px] font-bold text-teal-600 bg-teal-50 px-2 py-1 rounded">Buffered Playback</span>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Live Playback Buffers</p>
+                    <span className="text-[10px] font-bold text-teal-600 bg-teal-50 px-2 py-1 rounded">{outputMode === 'avatar' ? 'Audio + Video' : 'Audio'}</span>
                   </div>
                   <div className="flex gap-2 overflow-x-auto pb-2 scrollbar-hide">
                     {inferenceChunks.length === 0 ? (

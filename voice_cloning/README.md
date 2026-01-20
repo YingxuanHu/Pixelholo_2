@@ -76,7 +76,7 @@ python src/speak.py --profile name1 --text "Hello, this is a test."
 
 # 3b) One-step lip-synced video (voice + lips)
 # Requires the separate lip_syncing repo (sibling to voice_cloning):
-# /home/alvin/PixelHolo_trial/services/lip_syncing
+# /home/alvin/PixelHolo_trial/lip_syncing
 # Make sure models are present in lip_syncing/models (wav2lip_gan.pth, s3fd.pth).
 python src/speak_video.py --profile name1 --text "Hello from video."
 # If lip_syncing has its own venv:

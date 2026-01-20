@@ -8,14 +8,14 @@ It talks to the FastAPI backend in `voice_cloning`.
 1) Start the backend:
 
 ```bash
-cd /home/alvin/PixelHolo_trial/services/voice_cloning
+cd /home/alvin/PixelHolo_trial/voice_cloning
 uvicorn src.inference:app --host 0.0.0.0 --port 8000
 ```
 
 2) Install frontend deps + start:
 
 ```bash
-cd /home/alvin/PixelHolo_trial/apps/frontend
+cd /home/alvin/PixelHolo_trial/frontend
 npm install
 npm run dev
 ```

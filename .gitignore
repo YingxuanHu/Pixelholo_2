@@ -34,18 +34,22 @@ node_modules/
 Thumbs.db
 
 # Data + outputs (generated)
-services/voice_cloning/data/
-services/voice_cloning/outputs/
-services/lip_syncing/data/
-services/lip_syncing/outputs/
+voice_cloning/data/
+voice_cloning/outputs/
+lip_syncing/data/
+lip_syncing/outputs/
 
 # Model weights / checkpoints
-services/lip_syncing/models/
-services/voice_cloning/models/
-services/voice_cloning/lib/StyleTTS2/Models/
+lip_syncing/models/
+voice_cloning/models/
+voice_cloning/lib/StyleTTS2/Models/
+
+# Third-party repos
+lip_syncing/lib/Wav2Lip/
+voice_cloning/lib/StyleTTS2/
 
 # Frontend artifacts
-apps/frontend/.env*
+frontend/.env*
 
 # Reference / scratch
 reference/
