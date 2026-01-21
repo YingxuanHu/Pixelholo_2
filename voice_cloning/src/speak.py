@@ -4,6 +4,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -11,6 +12,10 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import (
     PROFILE_TYPE_AVATAR,
@@ -35,6 +40,25 @@ def _find_best_checkpoint(training_dir: Path) -> Path | None:
             candidate = Path(content)
             if candidate.exists():
                 return candidate
+    return None
+
+
+def _find_profile_checkpoint(training_dir: Path) -> Path | None:
+    for filename in ("profile.json", "inference_defaults.json"):
+        candidate = training_dir / filename
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            for key in ("model_path", "checkpoint_path", "checkpoint"):
+                value = data.get(key)
+                if value:
+                    resolved = Path(str(value)).expanduser()
+                    if resolved.exists():
+                        return resolved
     return None
 
 
@@ -409,6 +433,8 @@ def main() -> None:
         candidate = defaults.get("model_path")
         if candidate:
             model_path = Path(candidate)
+            if not model_path.is_absolute() and training_dir is not None:
+                model_path = training_dir / model_path
     if model_path is None and training_dir is not None:
         model_path = _find_best_checkpoint(training_dir) or _find_latest_checkpoint(training_dir)
 

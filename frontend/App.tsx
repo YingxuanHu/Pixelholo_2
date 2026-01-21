@@ -59,6 +59,7 @@ const App: React.FC = () => {
   const [lastUploadedFilename, setLastUploadedFilename] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [profilesStatus, setProfilesStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [uiNotice, setUiNotice] = useState<string | null>(null);
   const [stepStatuses, setStepStatuses] = useState<Record<string, StepStatus>>({
     upload: 'idle',
     preprocess: 'idle',
@@ -88,9 +89,13 @@ const App: React.FC = () => {
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const isBusy = Object.values(stepStatuses).some(status => status === 'running');
   const warmedProfilesRef = useRef<Set<string>>(new Set());
   const videoCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoTimerRef = useRef<number | null>(null);
+  const videoRafRef = useRef<number | null>(null);
+  const videoStartTimeRef = useRef<number | null>(null);
+  const videoNextFrameTimeRef = useRef<number | null>(null);
   const videoFpsRef = useRef<number>(25);
   const frameQueueRef = useRef<string[]>([]);
 
@@ -252,8 +257,28 @@ const App: React.FC = () => {
     }
   };
 
+  const isErrorLine = (line: string) => {
+    const normalized = line.toLowerCase();
+    if (normalized.includes('[process exited')) {
+      const match = normalized.match(/process exited\s+(\d+)/);
+      if (match) {
+        return match[1] !== '0';
+      }
+      return true;
+    }
+    return (
+      normalized.includes('traceback') ||
+      normalized.includes('exception') ||
+      normalized.includes('runtimeerror') ||
+      normalized.includes('error:') ||
+      normalized.includes('failed') ||
+      normalized.startsWith('error')
+    );
+  };
+
   const handleUpload = async (file: File) => {
     if (!profile.name || !file) return;
+    setUiNotice(null);
     setStepStatuses(prev => ({ ...prev, upload: 'running' }));
     const form = new FormData();
     form.append('profile', profile.name);
@@ -280,11 +305,13 @@ const App: React.FC = () => {
 
   const startPreprocess = async () => {
     if (!profile.name) return;
+    setUiNotice(null);
     setStepStatuses(prev => ({ ...prev, preprocess: 'running' }));
     setPreprocessLogs([createLog('Pipeline starting...', 'info')]);
     setPreprocessStats(null);
     setPreprocessProgress(0);
     setPreprocessStageIndex(preprocessSteps.length > 0 ? 0 : null);
+    let sawError = false;
     const payload = {
       profile: profile.name,
       filename: lastUploadedFilename ?? null,
@@ -299,7 +326,9 @@ const App: React.FC = () => {
       });
       if (!res.ok) throw new Error(await res.text());
       await streamResponseLines(res, line => {
-        setPreprocessLogs(prev => [...prev, createLog(line, line.includes('Error') ? 'error' : 'info')]);
+        const errorLine = isErrorLine(line);
+        if (errorLine) sawError = true;
+        setPreprocessLogs(prev => [...prev, createLog(line, errorLine ? 'error' : 'info')]);
         const stageUpdate = (label: string) => {
           const idx = preprocessSteps.indexOf(label);
           if (idx >= 0) {
@@ -343,6 +372,11 @@ const App: React.FC = () => {
           }
         }
       });
+      if (sawError) {
+        setStepStatuses(prev => ({ ...prev, preprocess: 'error' }));
+        setPreprocessStageIndex(null);
+        return;
+      }
       setStepStatuses(prev => ({ ...prev, preprocess: 'done' }));
       setPreprocessProgress(1);
       setPreprocessStageIndex(preprocessSteps.length ? preprocessSteps.length - 1 : null);
@@ -357,10 +391,12 @@ const App: React.FC = () => {
 
   const startTraining = async () => {
     if (!profile.name) return;
+    setUiNotice(null);
     setStepStatuses(prev => ({ ...prev, train: 'running' }));
     setTrainLogs([createLog('Launching trainer...', 'info')]);
     setTrainStats(null);
     setTrainStageIndex(trainSteps.length > 0 ? 0 : null);
+    let sawError = false;
 
     const payload = {
       profile: profile.name,
@@ -382,7 +418,9 @@ const App: React.FC = () => {
       });
       if (!res.ok) throw new Error(await res.text());
       await streamResponseLines(res, line => {
-        setTrainLogs(prev => [...prev, createLog(line, line.includes('Error') ? 'error' : 'info')]);
+        const errorLine = isErrorLine(line);
+        if (errorLine) sawError = true;
+        setTrainLogs(prev => [...prev, createLog(line, errorLine ? 'error' : 'info')]);
         const stageUpdate = (label: string) => {
           const idx = trainSteps.indexOf(label);
           if (idx >= 0) {
@@ -417,6 +455,11 @@ const App: React.FC = () => {
           stageUpdate('Build lexicon.json');
         }
       });
+      if (sawError) {
+        setStepStatuses(prev => ({ ...prev, train: 'error' }));
+        setTrainStageIndex(null);
+        return;
+      }
       setStepStatuses(prev => ({ ...prev, train: 'done' }));
       setTrainStageIndex(trainSteps.length ? trainSteps.length - 1 : null);
       setActiveStep(4);
@@ -450,9 +493,15 @@ const App: React.FC = () => {
       window.clearInterval(videoTimerRef.current);
       videoTimerRef.current = null;
     }
+    if (videoRafRef.current !== null) {
+      window.cancelAnimationFrame(videoRafRef.current);
+      videoRafRef.current = null;
+    }
     frameQueueRef.current = [];
     setVideoQueue(0);
     setVideoState('idle');
+    videoStartTimeRef.current = null;
+    videoNextFrameTimeRef.current = null;
     const canvas = videoCanvasRef.current;
     if (canvas) {
       const ctx = canvas.getContext('2d');
@@ -473,20 +522,42 @@ const App: React.FC = () => {
   }, []);
 
   const startVideoLoop = useCallback(() => {
-    if (videoTimerRef.current !== null) return;
-    const fps = Math.max(5, videoFpsRef.current || 25);
-    const intervalMs = Math.max(1000 / fps, 16);
-    videoTimerRef.current = window.setInterval(() => {
-      const nextFrame = frameQueueRef.current.shift();
-      if (!nextFrame) {
-        if (videoState === 'playing') setVideoState('buffering');
-        setVideoQueue(frameQueueRef.current.length);
+    if (videoRafRef.current !== null) return;
+    const tick = () => {
+      const ctx = audioContextRef.current;
+      if (!ctx) {
+        videoRafRef.current = window.requestAnimationFrame(tick);
         return;
       }
-      if (videoState !== 'playing') setVideoState('playing');
-      drawFrame(nextFrame);
-      setVideoQueue(frameQueueRef.current.length);
-    }, intervalMs);
+      const startAt = videoStartTimeRef.current;
+      if (startAt !== null) {
+        const fps = Math.max(5, videoFpsRef.current || 25);
+        const frameInterval = 1 / fps;
+        if (videoNextFrameTimeRef.current === null) {
+          videoNextFrameTimeRef.current = startAt;
+        }
+        const now = ctx.currentTime;
+        while (
+          videoNextFrameTimeRef.current !== null &&
+          now >= videoNextFrameTimeRef.current &&
+          frameQueueRef.current.length > 0
+        ) {
+          const nextFrame = frameQueueRef.current.shift();
+          if (nextFrame) {
+            drawFrame(nextFrame);
+          }
+          videoNextFrameTimeRef.current += frameInterval;
+        }
+        if (!frameQueueRef.current.length && videoState === 'playing') {
+          setVideoState('buffering');
+        } else if (frameQueueRef.current.length && videoState !== 'playing') {
+          setVideoState('playing');
+        }
+        setVideoQueue(frameQueueRef.current.length);
+      }
+      videoRafRef.current = window.requestAnimationFrame(tick);
+    };
+    videoRafRef.current = window.requestAnimationFrame(tick);
   }, [drawFrame, videoState]);
 
   const enqueueFrames = useCallback((frames: string[], fps?: number) => {
@@ -532,10 +603,12 @@ const App: React.FC = () => {
 
     source.start(startAt);
     nextStartTimeRef.current = endAt - overlap;
+    return { startAt, endAt };
   };
 
   const startInference = useCallback(async () => {
     if (!profile.name || !inferenceText) return;
+    setUiNotice(null);
     await ensureAudioContext();
     resetVideo();
     setStepStatuses(prev => ({ ...prev, inference: 'running' }));
@@ -543,6 +616,7 @@ const App: React.FC = () => {
     setLatency(null);
     setInferenceStageIndex(inferenceSteps.length > 0 ? 0 : null);
     nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
+    let sawError = false;
 
     if (streamAbortRef.current) {
       streamAbortRef.current.abort();
@@ -562,6 +636,7 @@ const App: React.FC = () => {
     };
     if (outputMode === 'avatar') {
       payload.avatar_profile = profile.name;
+      payload.low_latency = true;
     }
 
     try {
@@ -574,8 +649,24 @@ const App: React.FC = () => {
       });
       if (!res.ok) throw new Error(await res.text());
       await streamResponseLines(res, async line => {
-        const data = JSON.parse(line);
+        if (sawError) return;
+        let data: any;
+        try {
+          data = JSON.parse(line);
+        } catch (parseErr) {
+          sawError = true;
+          setStepStatuses(prev => ({ ...prev, inference: 'error' }));
+          setInferenceStageIndex(null);
+          return;
+        }
+        if (data.event === 'error') {
+          sawError = true;
+          setStepStatuses(prev => ({ ...prev, inference: 'error' }));
+          setInferenceStageIndex(null);
+          return;
+        }
         if (data.event === 'done') {
+          if (sawError) return;
           setLatency(prev => prev ? { ...prev, total: data.inference_ms ?? Math.round(performance.now() - startTime) } : null);
           setStepStatuses(prev => ({ ...prev, inference: 'done' }));
           setInferenceStageIndex(inferenceSteps.length ? inferenceSteps.length - 1 : null);
@@ -597,7 +688,11 @@ const App: React.FC = () => {
           bytes[i] = binary.charCodeAt(i);
         }
         const buffer = await audioContextRef.current!.decodeAudioData(bytes.buffer);
-        scheduleBuffer(buffer);
+        const schedule = scheduleBuffer(buffer);
+        if (outputMode === 'avatar' && schedule && videoStartTimeRef.current === null) {
+          videoStartTimeRef.current = schedule.startAt;
+          videoNextFrameTimeRef.current = schedule.startAt;
+        }
         if (outputMode === 'voice') {
           setInferenceStageIndex(Math.min(4, inferenceSteps.length - 1));
         }
@@ -740,12 +835,18 @@ const App: React.FC = () => {
           {[1, 2, 3, 4].map((step) => (
             <button
               key={step}
-              onClick={() => canProceedTo(step) && setActiveStep(step)}
-              disabled={!canProceedTo(step)}
+              onClick={() => {
+                if (isBusy) {
+                  setUiNotice('Stop the current job before changing steps.');
+                  return;
+                }
+                if (canProceedTo(step)) setActiveStep(step);
+              }}
+              disabled={isBusy || !canProceedTo(step)}
               className={`
                 relative flex items-center justify-center w-12 h-12 rounded-full border-2 font-bold transition-all duration-300
                 ${activeStep === step ? 'bg-teal-600 text-white border-teal-600 scale-110 shadow-lg shadow-teal-600/20' :
-                  canProceedTo(step) ? 'bg-white text-teal-600 border-teal-600 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed'}
+                  canProceedTo(step) && !isBusy ? 'bg-white text-teal-600 border-teal-600 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed'}
               `}
             >
               {step}
@@ -774,22 +875,32 @@ const App: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => {
+                          if (isBusy) {
+                            setUiNotice('A job is running. Stop it before switching workflows.');
+                            return;
+                          }
                           setProfileType('voice');
                           setProfile(prev => ({ ...prev, lastUploadedFile: null, fileSize: null }));
                           setLastUploadedFilename(null);
                         }}
-                        className={`px-3 py-2 rounded-lg text-xs font-bold transition-all ${profileType === 'voice' ? 'bg-teal-600 text-white shadow-lg shadow-teal-600/20' : 'bg-slate-100 text-slate-500'}`}
+                        disabled={isBusy}
+                        className={`px-3 py-2 rounded-lg text-xs font-bold transition-all ${profileType === 'voice' ? 'bg-teal-600 text-white shadow-lg shadow-teal-600/20' : 'bg-slate-100 text-slate-500'} ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         Voice Only
                       </button>
                       <button
                         type="button"
                         onClick={() => {
+                          if (isBusy) {
+                            setUiNotice('A job is running. Stop it before switching workflows.');
+                            return;
+                          }
                           setProfileType('avatar');
                           setProfile(prev => ({ ...prev, lastUploadedFile: null, fileSize: null }));
                           setLastUploadedFilename(null);
                         }}
-                        className={`px-3 py-2 rounded-lg text-xs font-bold transition-all ${profileType === 'avatar' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 text-slate-500'}`}
+                        disabled={isBusy}
+                        className={`px-3 py-2 rounded-lg text-xs font-bold transition-all ${profileType === 'avatar' ? 'bg-slate-900 text-white shadow-lg' : 'bg-slate-100 text-slate-500'} ${isBusy ? 'opacity-50 cursor-not-allowed' : ''}`}
                       >
                         Voice + Lip Sync
                       </button>
@@ -797,15 +908,32 @@ const App: React.FC = () => {
                     <p className="text-[10px] text-slate-400 mt-2 italic">
                       Voice-only profiles use audio datasets. Lip-sync profiles require video and an avatar cache.
                     </p>
+                    {isBusy && (
+                      <p className="text-[10px] text-amber-600 mt-2 font-semibold">
+                        Active job running. Stop it before changing profile or workflow.
+                      </p>
+                    )}
+                    {uiNotice && (
+                      <p className="text-[10px] text-rose-600 mt-2 font-semibold">
+                        {uiNotice}
+                      </p>
+                    )}
                   </div>
                   <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
                     <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Voice Identity Name</label>
                     <input
                       type="text"
                       value={profile.name}
-                      onChange={(e) => setProfile(prev => ({ ...prev, name: e.target.value }))}
+                      onChange={(e) => {
+                        if (isBusy) {
+                          setUiNotice('Stop the current job before changing the profile name.');
+                          return;
+                        }
+                        setProfile(prev => ({ ...prev, name: e.target.value }));
+                      }}
+                      disabled={isBusy}
                       placeholder="e.g. Alvin Studio Master"
-                      className="w-full bg-white border border-slate-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-teal-600 outline-none transition-all font-semibold"
+                      className={`w-full bg-white border border-slate-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-teal-600 outline-none transition-all font-semibold ${isBusy ? 'opacity-60 cursor-not-allowed' : ''}`}
                     />
                     <p className="text-[10px] text-slate-400 mt-2 italic">Used to organize your models and generated assets.</p>
                   </div>
@@ -827,6 +955,7 @@ const App: React.FC = () => {
                       <p className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Existing Profiles</p>
                       <button
                         onClick={loadProfiles}
+                        disabled={isBusy}
                         className="text-[10px] font-bold text-teal-600"
                         type="button"
                       >
@@ -845,6 +974,10 @@ const App: React.FC = () => {
                             key={item.name}
                             type="button"
                             onClick={() => {
+                              if (isBusy) {
+                                setUiNotice('Stop the current job before switching profiles.');
+                                return;
+                              }
                               if (item.profile_type === 'avatar') {
                                 setProfileType('avatar');
                               } else if (item.profile_type === 'voice') {
@@ -854,11 +987,12 @@ const App: React.FC = () => {
                               setLastUploadedFilename(null);
                               setActiveStep(item.has_profile ? 4 : 2);
                             }}
+                            disabled={isBusy}
                             className={`w-full flex items-center justify-between border rounded-lg px-3 py-2 text-left ${
                               profile.name === item.name
                                 ? 'border-teal-600 bg-teal-50 text-teal-800'
                                 : 'border-slate-200 bg-white text-slate-600'
-                            }`}
+                            } ${isBusy ? 'opacity-60 cursor-not-allowed' : ''}`}
                           >
                             <div>
                               <p className="text-xs font-bold">{item.name}</p>
@@ -1206,8 +1340,15 @@ const App: React.FC = () => {
       <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex gap-4">
         {activeStep > 1 && (
           <button
-            onClick={() => setActiveStep(prev => prev - 1)}
-            className="bg-white border-2 border-slate-100 text-slate-600 font-bold px-6 py-3 rounded-2xl shadow-xl hover:bg-slate-50 transition-all flex items-center gap-2"
+            onClick={() => {
+              if (isBusy) {
+                setUiNotice('Stop the current job before changing steps.');
+                return;
+              }
+              setActiveStep(prev => prev - 1);
+            }}
+            disabled={isBusy}
+            className={`bg-white border-2 border-slate-100 text-slate-600 font-bold px-6 py-3 rounded-2xl shadow-xl hover:bg-slate-50 transition-all flex items-center gap-2 ${isBusy ? 'opacity-60 cursor-not-allowed' : ''}`}
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7" /></svg>
             Previous
@@ -1215,8 +1356,15 @@ const App: React.FC = () => {
         )}
         {canProceedTo(activeStep + 1) && activeStep < 4 && (
           <button
-            onClick={() => setActiveStep(prev => prev + 1)}
-            className="bg-teal-600 text-white font-bold px-8 py-3 rounded-2xl shadow-xl shadow-teal-600/20 hover:bg-teal-700 transition-all flex items-center gap-2 animate-bounce-short"
+            onClick={() => {
+              if (isBusy) {
+                setUiNotice('Stop the current job before changing steps.');
+                return;
+              }
+              setActiveStep(prev => prev + 1);
+            }}
+            disabled={isBusy}
+            className={`bg-teal-600 text-white font-bold px-8 py-3 rounded-2xl shadow-xl shadow-teal-600/20 hover:bg-teal-700 transition-all flex items-center gap-2 ${isBusy ? 'opacity-60 cursor-not-allowed' : 'animate-bounce-short'}`}
           >
             Next Stage
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7" /></svg>

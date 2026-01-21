@@ -15,7 +15,9 @@ python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type vo
 python src/speak.py --profile alice --profile_type voice --text "Hello"
 
 # Voice + lip sync video
-python src/speak_video.py --profile alice --profile_type avatar --text "Hello from video"
+python src/preprocess_video.py --video /path/to/user.mp4 --name alice
+python src/train.py --dataset_path ./data/avatar_profiles/alice --profile_type avatar
+python src/speak_video.py --profile alice --text "Hello from video"
 
 # Frontend
 cd /home/alvin/PixelHolo_trial/frontend
@@ -33,8 +35,9 @@ npm run dev
 cd /home/alvin/PixelHolo_trial/voice_cloning
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+If `python` isn't available on your system, use `python3 -m venv .venv` and `.venv/bin/python -m pip install -r requirements.txt`.
 
 Clone StyleTTS2 and download LibriTTS weights:
 ```bash
@@ -51,8 +54,9 @@ wget -O StyleTTS2/Models/LibriTTS/config.yml   https://huggingface.co/yl4579/Sty
 cd /home/alvin/PixelHolo_trial/lip_syncing
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+If `python` isn't available on your system, use `python3 -m venv .venv` and `.venv/bin/python -m pip install -r requirements.txt`.
 
 Clone Wav2Lip and download checkpoints:
 ```bash
@@ -71,12 +75,12 @@ npm install
 ## Quick start (CLI)
 1) Preprocess a video (builds voice dataset + avatar cache)
 ```bash
-python /home/alvin/PixelHolo_trial/voice_cloning/src/preprocess.py   --video /path/to/user.mp4   --name alice
+python /home/alvin/PixelHolo_trial/voice_cloning/src/preprocess.py   --video /path/to/user.mp4   --name alice --profile_type voice
 ```
 
 2) Train
 ```bash
-python /home/alvin/PixelHolo_trial/voice_cloning/src/train.py   --dataset_path /home/alvin/PixelHolo_trial/voice_cloning/data/alice
+python /home/alvin/PixelHolo_trial/voice_cloning/src/train.py   --dataset_path /home/alvin/PixelHolo_trial/voice_cloning/data/voice_profiles/alice --profile_type voice
 ```
 
 3) Voice inference (audio)
@@ -86,6 +90,8 @@ python /home/alvin/PixelHolo_trial/voice_cloning/src/speak.py   --profile alice 
 
 4) Voice + lip sync (video)
 ```bash
+python /home/alvin/PixelHolo_trial/voice_cloning/src/preprocess_video.py   --video /path/to/user.mp4   --name alice
+python /home/alvin/PixelHolo_trial/voice_cloning/src/train.py   --dataset_path /home/alvin/PixelHolo_trial/voice_cloning/data/avatar_profiles/alice --profile_type avatar
 python /home/alvin/PixelHolo_trial/voice_cloning/src/speak_video.py   --profile alice   --text "Hello from video"
 ```
 
@@ -104,10 +110,28 @@ npm run dev
 ```
 
 ## Data and outputs
-- `voice_cloning/data/voice_profiles/<profile>/` - dataset + metadata
-- `voice_cloning/outputs/training/<type>/<profile>/` - checkpoints + logs
-- `voice_cloning/outputs/audio/<type>/<profile>/` - generated wav
-- `voice_cloning/outputs/video/<type>/<profile>/` - generated mp4
+All outputs live under `voice_cloning/`:
+```
+voice_cloning/
+  data/
+    voice_profiles/<profile>/        # audio-only dataset
+    avatar_profiles/<profile>/       # video-enabled dataset (includes avatar_cache/)
+  outputs/
+    training/
+      voice/<profile>/               # checkpoints + config_ft.yml + profile.json
+      avatar/<profile>/              # same, but for avatar profiles
+    audio/
+      voice/<profile>/               # generated wav (speak.py, auto-select samples)
+      avatar/<profile>/              # generated wav for avatar runs
+    video/
+      avatar/<profile>/              # generated lip-sync mp4
+```
+
+What the files mean:
+- `profile.json` - inference defaults (model path, ref wav, alpha/beta, f0_scale).
+- `best_epoch.txt` - pointer to the selected checkpoint.
+- `epoch_scores.json` - full scoring history from auto-select.
+- `f0_scale.txt` - auto-estimated pitch scale.
 
 ## Notes
 - `voice_cloning` will look for `lip_syncing` as a sibling folder under the repo root.
@@ -121,3 +145,4 @@ npm run dev
 - **Phonemizer errors**: install `espeak-ng` system-wide.
 - **ffmpeg missing**: install `ffmpeg` and ensure it is on PATH.
 - **Lip sync models not found**: confirm `lip_syncing/models/s3fd-619a316812.pth` and `lip_syncing/models/wav2lip_gan.pth` exist.
+- **uvicorn not executable**: reinstall in the venv (`python -m pip install --force-reinstall uvicorn`) or run `python -m uvicorn ...`.

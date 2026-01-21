@@ -9,7 +9,7 @@ source .venv/bin/activate
 python src/preprocess.py --video /path/to/user.mp4 --name alice --profile_type voice
 python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type voice
 python src/speak.py --profile alice --text "Hello"
-python src/speak_video.py --profile alice --profile_type avatar --text "Hello from video"
+python src/speak_video.py --profile alice --text "Hello from video"
 ```
 
 ## Requirements
@@ -22,8 +22,9 @@ python src/speak_video.py --profile alice --profile_type avatar --text "Hello fr
 cd /home/alvin/PixelHolo_trial/voice_cloning
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+If `python` isn't available on your system, use `python3 -m venv .venv` and `.venv/bin/python -m pip install -r requirements.txt`.
 
 Clone StyleTTS2 and download LibriTTS weights:
 ```bash
@@ -42,14 +43,23 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$(python -c "import sysconfig; print(sys
 ```
 
 ## Project layout
-- `data/` - datasets per profile
-  - `data/voice_profiles/<profile>/` - audio-only
-  - `data/avatar_profiles/<profile>/` - video-enabled (avatar cache)
-- `outputs/training/` - checkpoints and logs
-- `outputs/audio/` - generated wav (per profile)
-- `outputs/video/` - generated mp4 (per profile)
+- `data/`
+  - `voice_profiles/<profile>/` - audio-only dataset
+  - `avatar_profiles/<profile>/` - video-enabled dataset (includes `avatar_cache/`)
+- `outputs/`
+  - `training/voice/<profile>/` - checkpoints + `config_ft.yml` + `profile.json`
+  - `training/avatar/<profile>/` - same but for avatar profiles
+  - `audio/voice/<profile>/` - generated wav (speak.py, auto-select samples)
+  - `audio/avatar/<profile>/` - generated wav for avatar runs
+  - `video/avatar/<profile>/` - generated lip-sync mp4
 - `src/` - core scripts
 - `config.py` - shared settings
+
+Key files:
+- `profile.json` - inference defaults (model path, ref wav, alpha/beta, f0_scale).
+- `best_epoch.txt` - selected checkpoint from auto-select.
+- `epoch_scores.json` - scoring history for all checkpoints.
+- `f0_scale.txt` - auto-estimated pitch scale.
 
 ## Workflow (end-to-end)
 
@@ -61,7 +71,13 @@ python src/preprocess.py --video /path/to/user.mp4 --name alice --profile_type v
 Notes:
 - Default preprocessing uses HP/LP filters and stricter text filtering.
 - Denoise is optional (`--denoise`).
-- Avatar baking can be disabled with `--no_bake_avatar`.
+- For avatar profiles, use `src/preprocess_video.py` instead.
+
+### 1b) Preprocess (avatar video)
+Builds the audio dataset and avatar cache in one pass:
+```bash
+python src/preprocess_video.py --video /path/to/user.mp4 --name alice
+```
 
 ### 2) Train
 ```bash
@@ -89,7 +105,7 @@ Requires the sibling repo:
 and the Wav2Lip models in `lip_syncing/models/`.
 
 ```bash
-python src/speak_video.py --profile alice --profile_type avatar --text "Hello from video"
+python src/speak_video.py --profile alice --text "Hello from video"
 ```
 
 ## API server
@@ -110,8 +126,12 @@ Endpoints:
 - `--language` Whisper language (default `en`)
 - `--denoise` optional
 - `--min_words`, `--min_speech_ratio`, `--min_avg_logprob`, `--max_no_speech_prob`
+
+### Preprocess (avatar) (`src/preprocess_video.py`)
+- All audio flags above, plus:
 - `--no_bake_avatar` to skip lip sync cache
-- `--avatar_fps`, `--avatar_loop_sec`, `--avatar_resize_factor`, `--avatar_pads`
+- `--avatar_fps`, `--avatar_loop_sec`, `--avatar_loop_fade_sec`, `--avatar_resize_factor`, `--avatar_pads`
+- `--avatar_batch_size`, `--avatar_nosmooth`, `--avatar_device`
 
 ### Train (`src/train.py`)
 - `--dataset_path` input dataset
@@ -137,6 +157,7 @@ Endpoints:
 - `--video` optional override
 - `--lipsync_dir` path to `lip_syncing` (default sibling)
 - `--lipsync_python` optional venv python
+- `--lipsync_mode` (`chunked`, `lib`, `cached`)
 - Chunked options: `--chunk_sec`, `--resize_factor`, `--fourcc`, `--face_det_batch_size`, `--wav2lip_batch_size`, `--pads`, `--concat_mode`
 
 ## Notes
@@ -151,3 +172,4 @@ Endpoints:
 - **BERT length errors**: lower `--max_text_chars` or `--max_text_words`.
 - **OOM**: reduce `--batch_size` and `--max_len`.
 - **Lip sync missing**: ensure `lip_syncing/` exists as a sibling and models are in `lip_syncing/models/`.
+- **uvicorn not executable**: reinstall in the venv (`python -m pip install --force-reinstall uvicorn`) or run `python -m uvicorn ...`.

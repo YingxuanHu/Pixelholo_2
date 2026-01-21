@@ -237,6 +237,40 @@ def _stats_penalty(stats: dict[str, float]) -> float:
     )
 
 
+def _in_sweet_spot(stats: dict[str, float], sweet: dict[str, dict[str, float]]) -> bool:
+    if not stats:
+        return False
+    def _ok(key: str) -> bool:
+        bounds = sweet.get(key, {})
+        low = bounds.get("min")
+        high = bounds.get("max")
+        value = stats.get(f"{key}_loss")
+        if value is None or not np.isfinite(value):
+            return False
+        if low is not None and value < low:
+            return False
+        if high is not None and value > high:
+            return False
+        return True
+    return _ok("val") and _ok("dur") and _ok("f0")
+
+
+def _load_sweet_spot(config_path: Path) -> dict[str, dict[str, float]]:
+    try:
+        config = yaml.safe_load(config_path.read_text())
+    except Exception:
+        return {}
+    if not isinstance(config, dict):
+        return {}
+    early_stop = config.get("early_stop")
+    if not isinstance(early_stop, dict):
+        return {}
+    sweet = early_stop.get("sweet_spot")
+    if not isinstance(sweet, dict):
+        return {}
+    return sweet
+
+
 def _normalized_stats_scores(
     epoch_stats: dict[int, dict[str, float]],
     weights: dict[str, float],
@@ -455,6 +489,54 @@ def main() -> None:
         help="Pick earliest epoch within this score margin of the best.",
     )
     parser.add_argument(
+        "--score_margin_ratio",
+        type=float,
+        default=0.08,
+        help="Pick earliest epoch within this percent of the best score (relative margin).",
+    )
+    parser.add_argument(
+        "--early_epoch_cap",
+        type=int,
+        default=10,
+        help="Prefer epochs at or before this index when quality is comparable (0 to disable).",
+    )
+    parser.add_argument(
+        "--early_prefer_min",
+        type=int,
+        default=3,
+        help="Lower bound for early-epoch preference window (0 to disable).",
+    )
+    parser.add_argument(
+        "--early_prefer_max",
+        type=int,
+        default=8,
+        help="Upper bound for early-epoch preference window (0 to disable).",
+    )
+    parser.add_argument(
+        "--early_window_margin_ratio",
+        type=float,
+        default=2.0,
+        help="Allow early-window epochs within this normalized margin of the best smooth score.",
+    )
+    parser.add_argument(
+        "--smooth_window",
+        type=int,
+        default=3,
+        help="Epoch smoothing window for selection (>=1).",
+    )
+    parser.add_argument(
+        "--early_bias",
+        type=float,
+        default=1.0,
+        help="Penalty added for later epochs (higher = stronger early bias).",
+    )
+    parser.add_argument(
+        "--sweet_bonus",
+        type=float,
+        default=0.0,
+        help="Bonus (negative) applied when epoch stats fall inside sweet-spot ranges.",
+    )
+    parser.add_argument(
         "--no_prefer_earlier",
         action="store_false",
         dest="prefer_earlier",
@@ -477,7 +559,7 @@ def main() -> None:
     parser.add_argument(
         "--stats_weight",
         type=float,
-        default=1.0,
+        default=0.0,
         help="Weight for normalized val/dur/f0 stats score.",
     )
     parser.add_argument(
@@ -591,6 +673,7 @@ def main() -> None:
                     checkpoints = filtered
     stats_weights = {"val": 0.2, "dur": 0.5, "f0": 0.3}
     stats_scores = _normalized_stats_scores(epoch_stats, stats_weights) if epoch_stats else {}
+    sweet_spot = _load_sweet_spot(config_path)
     results = []
     store_audio = args.save_best or args.use_resemblyzer
     best_audio_by_ckpt = {} if store_audio else None
@@ -660,9 +743,13 @@ def main() -> None:
         epoch_index = _epoch_index(str(ckpt))
         stats = epoch_stats.get(epoch_index) if epoch_index is not None else None
         stats_penalty = _stats_penalty(stats) if stats else 0.0
+        sweet_bonus = 0.0
+        if stats and sweet_spot:
+            if _in_sweet_spot(stats, sweet_spot):
+                sweet_bonus = -abs(args.sweet_bonus)
         stats_score = stats_scores.get(epoch_index) if epoch_index is not None else None
         base_score = float(np.median(sample_scores)) if sample_scores else _score(summary)
-        score = base_score + (failures * 0.5) + stats_penalty
+        score = base_score + (failures * 0.5) + stats_penalty + sweet_bonus
         if stats_score is not None:
             score += stats_score * args.stats_weight
         entry = {
@@ -674,6 +761,7 @@ def main() -> None:
             "stats": stats or {},
             "stats_penalty": stats_penalty,
             "stats_score": stats_score,
+            "sweet_bonus": sweet_bonus,
         }
         results.append(entry)
         if best_audio_by_ckpt is not None and best_sample is not None:
@@ -688,17 +776,93 @@ def main() -> None:
 
     results_sorted = sorted(results, key=lambda item: item["score"])
     best = results_sorted[0]
-    if args.prefer_earlier and args.score_margin is not None and args.score_margin >= 0:
-        cutoff = best["score"] + args.score_margin
-        candidates = [item for item in results_sorted if item["score"] <= cutoff]
+    max_epoch = max(
+        (item["epoch_index"] for item in results_sorted if item["epoch_index"] is not None),
+        default=0,
+    )
+
+    if args.prefer_earlier:
+        margin_abs = max(0.0, args.score_margin or 0.0)
+        margin_rel = max(0.0, args.score_margin_ratio or 0.0)
+
+        epoch_series = [item for item in results_sorted if item["epoch_index"] is not None]
+        epoch_series.sort(key=lambda item: item["epoch_index"])
+        smooth_window = max(1, args.smooth_window or 1)
+        half_window = smooth_window // 2
+        for idx, entry in enumerate(epoch_series):
+            start = max(0, idx - half_window)
+            end = min(len(epoch_series), idx + half_window + 1)
+            window_scores = [item["score"] for item in epoch_series[start:end]]
+            entry["smooth_score"] = float(np.median(window_scores))
+        for entry in results_sorted:
+            entry.setdefault("smooth_score", entry["score"])
+
+        smooth_values = [item["smooth_score"] for item in results_sorted]
+        smooth_min = min(smooth_values)
+        smooth_max = max(smooth_values)
+        smooth_range = smooth_max - smooth_min
+        for entry in results_sorted:
+            if smooth_range < 1e-6:
+                entry["smooth_norm"] = 0.0
+            else:
+                entry["smooth_norm"] = (entry["smooth_score"] - smooth_min) / smooth_range
+
+        best_score = min(item["smooth_norm"] for item in results_sorted)
+        margin = max(margin_abs, best_score * margin_rel)
+        cutoff = best_score + margin
+        candidates = [item for item in results_sorted if item["smooth_norm"] <= cutoff]
         if candidates:
-            candidates.sort(
-                key=lambda item: (
-                    item["epoch_index"] is None,
-                    item["epoch_index"] if item["epoch_index"] is not None else 0,
-                )
-            )
-            best = candidates[0]
+            selected_from_window = False
+            if args.early_prefer_min > 0 and args.early_prefer_max > 0:
+                early_window = [
+                    item
+                    for item in results_sorted
+                    if item["epoch_index"] is not None
+                    and args.early_prefer_min <= item["epoch_index"] <= args.early_prefer_max
+                ]
+                if early_window:
+                    early_best_score = min(item["smooth_norm"] for item in early_window)
+                    early_cutoff = best_score + max(0.0, args.early_window_margin_ratio)
+                    if early_best_score <= early_cutoff:
+                        early_candidates = [
+                            item for item in early_window if item["smooth_norm"] <= early_cutoff
+                        ]
+                        early_candidates.sort(key=lambda item: item["epoch_index"])
+                        best = early_candidates[0] if early_candidates else early_window[0]
+                        selected_from_window = True
+                else:
+                    candidates.sort(
+                        key=lambda item: (
+                            item["epoch_index"] is None,
+                            item["epoch_index"] if item["epoch_index"] is not None else 0,
+                        )
+                    )
+                    best = candidates[0]
+            elif args.early_epoch_cap and args.early_epoch_cap > 0:
+                early = [
+                    item
+                    for item in candidates
+                    if item["epoch_index"] is not None and item["epoch_index"] <= args.early_epoch_cap
+                ]
+                if early:
+                    early.sort(key=lambda item: item["epoch_index"])
+                    best = early[0]
+                else:
+                    candidates.sort(
+                        key=lambda item: (
+                            item["epoch_index"] is None,
+                            item["epoch_index"] if item["epoch_index"] is not None else 0,
+                        )
+                    )
+                    best = candidates[0]
+
+            if args.early_bias and max_epoch > 0 and not selected_from_window:
+                def _biased(item: dict) -> float:
+                    epoch_idx = item.get("epoch_index")
+                    epoch_ratio = (epoch_idx / max_epoch) if isinstance(epoch_idx, int) else 1.0
+                    return item["smooth_norm"] + (epoch_ratio * args.early_bias)
+
+                best = min(candidates, key=_biased)
 
     if args.use_resemblyzer and speaker_encoder is not None and preprocess_wav is not None:
         top_n = max(1, args.quality_top_n)
@@ -776,16 +940,24 @@ def main() -> None:
             stats_score_str = ""
             if isinstance(stats_score, (int, float)) and np.isfinite(stats_score):
                 stats_score_str = f"  stats_score={stats_score:.3f}"
+            smooth_score = entry.get("smooth_score")
+            smooth_score_str = ""
+            if isinstance(smooth_score, (int, float)) and np.isfinite(smooth_score):
+                smooth_score_str = f"  smooth={smooth_score:.3f}"
+            smooth_norm = entry.get("smooth_norm")
+            smooth_norm_str = ""
+            if isinstance(smooth_norm, (int, float)) and np.isfinite(smooth_norm):
+                smooth_norm_str = f" norm={smooth_norm:.3f}"
             spk_sim = entry.get("spk_sim")
             if spk_sim is None:
                 print(
-                    f"  epoch {epoch_display}  score {entry['score']:.5f}{stats_str}{stats_score_str}  "
-                    f"{entry['checkpoint']}"
+                    f"  epoch {epoch_display}  score {entry['score']:.5f}{stats_str}{stats_score_str}"
+                    f"{smooth_score_str}{smooth_norm_str}  {entry['checkpoint']}"
                 )
             else:
                 print(
-                    f"  epoch {epoch_display}  score {entry['score']:.5f}{stats_str}{stats_score_str}  "
-                    f"spk {spk_sim:.4f}  {entry['checkpoint']}"
+                    f"  epoch {epoch_display}  score {entry['score']:.5f}{stats_str}{stats_score_str}"
+                    f"{smooth_score_str}{smooth_norm_str}  spk {spk_sim:.4f}  {entry['checkpoint']}"
                 )
     print(f"Wrote {best_path}")
     print(f"Wrote {results_path}")

@@ -1,4 +1,6 @@
 import base64
+import queue
+import threading
 import contextlib
 import json
 import io
@@ -128,6 +130,29 @@ def _split_text(text: str, max_chars: int, max_words: int) -> list[str]:
                 current = []
         if current:
             chunks.append(" ".join(current))
+    return chunks
+
+
+def _split_text_warmup(
+    text: str, max_chars: int, max_words: int, warmup_words: int = 4, warmup_scan: int = 8
+) -> list[str]:
+    words = text.split()
+    if len(words) <= warmup_scan:
+        return _split_text(text, max_chars, max_words)
+    split_idx = None
+    for i, word in enumerate(words[:warmup_scan]):
+        if any(p in word for p in [",", ".", "!", "?"]):
+            split_idx = i + 1
+            break
+    if split_idx is None:
+        split_idx = min(warmup_words, len(words))
+    warmup = " ".join(words[:split_idx]).strip()
+    rest = " ".join(words[split_idx:]).strip()
+    if not warmup:
+        return _split_text(text, max_chars, max_words)
+    chunks = [warmup]
+    if rest:
+        chunks.extend(_split_text(rest, max_chars, max_words))
     return chunks
 
 
@@ -319,12 +344,26 @@ def _first_wav(directory: Path | None) -> Path | None:
     return None
 
 
-def _resolve_ref_wav(ref_wav_path: str | None, speaker: str | None, profile_type: str | None) -> Path:
+def _resolve_ref_wav(
+    ref_wav_path: str | None,
+    speaker: str | None,
+    profile_type: str | None,
+    model_path: Path | None = None,
+) -> Path:
     if ref_wav_path:
         path = Path(ref_wav_path).expanduser()
         if path.exists():
             return path
         raise HTTPException(status_code=400, detail=f"ref_wav_path not found: {ref_wav_path}")
+
+    if model_path is not None:
+        profile = _load_profile_defaults_for_speaker(model_path, speaker, profile_type)
+        ref_value = profile.get("ref_wav_path")
+        if ref_value:
+            base_dir = resolve_training_dir(speaker, profile_type) if speaker else model_path.parent
+            candidate = _resolve_path(base_dir, str(ref_value))
+            if candidate and candidate.exists():
+                return candidate
 
     env_ref = os.getenv("STYLE_TTS2_REF_WAV")
     if env_ref:
@@ -383,6 +422,22 @@ def _resolve_model_path(
 
     if speaker:
         training_dir = resolve_training_dir(speaker, profile_type)
+        for filename in ("profile.json", "inference_defaults.json"):
+            candidate = training_dir / filename
+            if candidate.exists():
+                try:
+                    data = json.loads(candidate.read_text())
+                except json.JSONDecodeError:
+                    data = {}
+                if isinstance(data, dict):
+                    for key in ("model_path", "checkpoint_path", "checkpoint"):
+                        value = data.get(key)
+                        if value:
+                            resolved = Path(str(value)).expanduser()
+                            if not resolved.is_absolute():
+                                resolved = training_dir / resolved
+                            if resolved.exists():
+                                return resolved
         best_path = training_dir / "best_epoch.txt"
         if best_path.exists():
             content = best_path.read_text().strip()
@@ -401,6 +456,16 @@ def _list_profiles(profile_type: str | None) -> list[dict[str, object]]:
     types = [profile_type] if profile_type else [PROFILE_TYPE_VOICE, PROFILE_TYPE_AVATAR]
     profiles: list[dict[str, object]] = []
     legacy_training_root = OUTPUTS_DIR / TRAINING_DIRNAME
+
+    def _has_training_artifacts(path: Path) -> bool:
+        if not path.exists() or not path.is_dir():
+            return False
+        if (path / "profile.json").exists():
+            return True
+        if list(path.glob("epoch_2nd_*.pth")):
+            return True
+        return False
+
     for ptype in types:
         data_root = profile_data_root(ptype)
         training_root_dir = training_root(ptype)
@@ -410,7 +475,11 @@ def _list_profiles(profile_type: str | None) -> list[dict[str, object]]:
         if training_root_dir.exists():
             names.update([p.name for p in training_root_dir.iterdir() if p.is_dir()])
         if ptype == PROFILE_TYPE_VOICE and legacy_training_root.exists():
-            names.update([p.name for p in legacy_training_root.iterdir() if p.is_dir()])
+            legacy_names = []
+            for p in legacy_training_root.iterdir():
+                if p.is_dir() and _has_training_artifacts(p):
+                    legacy_names.append(p.name)
+            names.update(legacy_names)
         for name in sorted(names):
             data_dir = data_root / name
             training_dir = training_root_dir / name
@@ -418,6 +487,9 @@ def _list_profiles(profile_type: str | None) -> list[dict[str, object]]:
                 legacy_dir = legacy_training_root / name
                 if legacy_dir.exists():
                     training_dir = legacy_dir
+            has_training = _has_training_artifacts(training_dir)
+            if not data_dir.exists() and not has_training:
+                continue
             raw_count = len(list((data_dir / "raw_videos").glob("*"))) if data_dir.exists() else 0
             processed_count = len(list((data_dir / "processed_wavs").glob("*.wav"))) if data_dir.exists() else 0
             profile_json = training_dir / "profile.json"
@@ -444,12 +516,24 @@ def _list_profiles(profile_type: str | None) -> list[dict[str, object]]:
     return profiles
 
 
-def _resolve_config_path(model_path: Path, config_path: str | None) -> Path:
+def _resolve_config_path(
+    model_path: Path,
+    config_path: str | None,
+    speaker: str | None = None,
+    profile_type: str | None = None,
+) -> Path:
     if config_path:
         path = Path(config_path).expanduser()
         if path.exists():
             return path
         raise HTTPException(status_code=400, detail=f"config_path not found: {config_path}")
+
+    profile = _load_profile_defaults_for_speaker(model_path, speaker, profile_type)
+    if "config_path" in profile:
+        base_dir = resolve_training_dir(speaker, profile_type) if speaker else model_path.parent
+        candidate = _resolve_path(base_dir, str(profile["config_path"]))
+        if candidate and candidate.exists():
+            return candidate
 
     env_config = os.getenv("STYLE_TTS2_CONFIG")
     if env_config:
@@ -495,10 +579,34 @@ def _load_profile_defaults(model_path: Path) -> dict:
     return {}
 
 
-def _resolve_phonemizer_lang(model_path: Path, req: "GenerateRequest") -> str:
+def _load_profile_defaults_for_speaker(
+    model_path: Path,
+    speaker: str | None,
+    profile_type: str | None,
+) -> dict:
+    if speaker:
+        training_dir = resolve_training_dir(speaker, profile_type)
+        for filename in ("profile.json", "inference_defaults.json"):
+            candidate = training_dir / filename
+            if candidate.exists():
+                try:
+                    data = json.loads(candidate.read_text())
+                except json.JSONDecodeError:
+                    data = {}
+                if isinstance(data, dict):
+                    return data
+    return _load_profile_defaults(model_path)
+
+
+def _resolve_phonemizer_lang(
+    model_path: Path,
+    req: "GenerateRequest",
+    speaker: str | None,
+    profile_type: str | None,
+) -> str:
     if req.phonemizer_lang:
         return req.phonemizer_lang
-    profile = _load_profile_defaults(model_path)
+    profile = _load_profile_defaults_for_speaker(model_path, speaker, profile_type)
     if "phonemizer_lang" in profile:
         return str(profile["phonemizer_lang"])
     return os.getenv("STYLE_TTS2_LANG", DEFAULT_LANG)
@@ -512,7 +620,7 @@ def _resolve_lexicon_path(
 ) -> Path | None:
     if req.lexicon_path:
         return Path(req.lexicon_path).expanduser()
-    profile = _load_profile_defaults(model_path)
+    profile = _load_profile_defaults_for_speaker(model_path, speaker, profile_type)
     if "lexicon_path" in profile:
         return Path(str(profile["lexicon_path"])).expanduser()
     env_path = os.getenv("STYLE_TTS2_LEXICON")
@@ -551,7 +659,12 @@ def _load_lexicon(path: Path | None) -> dict[str, str] | None:
     return cleaned or None
 
 
-def _resolve_inference_params(model_path: Path, req: "GenerateRequest") -> dict[str, float]:
+def _resolve_inference_params(
+    model_path: Path,
+    req: "GenerateRequest",
+    speaker: str | None,
+    profile_type: str | None,
+) -> dict[str, float]:
     defaults = {
         "alpha": DEFAULT_ALPHA,
         "beta": DEFAULT_BETA,
@@ -559,7 +672,7 @@ def _resolve_inference_params(model_path: Path, req: "GenerateRequest") -> dict[
         "embedding_scale": DEFAULT_EMBEDDING_SCALE,
         "f0_scale": DEFAULT_F0_SCALE,
     }
-    profile = _load_profile_defaults(model_path)
+    profile = _load_profile_defaults_for_speaker(model_path, speaker, profile_type)
     for key in defaults:
         if key in profile:
             defaults[key] = profile[key]
@@ -610,6 +723,7 @@ class GenerateRequest(BaseModel):
     crossfade_ms: float | None = None
     avatar_profile: str | None = None
     avatar_fps: float | None = None
+    low_latency: bool | None = None
     return_base64: bool = False
 
 
@@ -620,6 +734,7 @@ class PreprocessRequest(BaseModel):
     bake_avatar: bool = True
     avatar_fps: float | None = None
     avatar_loop_sec: float | None = None
+    avatar_loop_fade_sec: float | None = None
     avatar_resize_factor: int | None = None
     avatar_pads: str | None = None
     avatar_batch_size: int | None = None
@@ -1035,32 +1150,47 @@ def preprocess(req: PreprocessRequest):
     video_path = raw_dir / filename
     if not video_path.exists():
         raise HTTPException(status_code=400, detail=f"file not found: {video_path}")
-    command = [
-        sys.executable,
-        str(PROJECT_ROOT / "src" / "preprocess.py"),
-        "--video",
-        str(video_path),
-        "--name",
-        profile,
-        "--profile_type",
-        profile_type,
-    ]
-    if not req.bake_avatar or profile_type == PROFILE_TYPE_VOICE:
-        command.append("--no_bake_avatar")
-    if req.avatar_fps is not None:
-        command += ["--avatar_fps", str(req.avatar_fps)]
-    if req.avatar_loop_sec is not None:
-        command += ["--avatar_loop_sec", str(req.avatar_loop_sec)]
-    if req.avatar_resize_factor is not None:
-        command += ["--avatar_resize_factor", str(req.avatar_resize_factor)]
-    if req.avatar_pads:
-        command += ["--avatar_pads", req.avatar_pads]
-    if req.avatar_batch_size is not None:
-        command += ["--avatar_batch_size", str(req.avatar_batch_size)]
-    if req.avatar_nosmooth:
-        command.append("--avatar_nosmooth")
-    if req.avatar_device:
-        command += ["--avatar_device", req.avatar_device]
+    preprocess_script = "preprocess.py"
+    command = []
+    if profile_type == PROFILE_TYPE_AVATAR:
+        preprocess_script = "preprocess_video.py"
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "src" / preprocess_script),
+            "--video",
+            str(video_path),
+            "--name",
+            profile,
+        ]
+        if not req.bake_avatar:
+            command.append("--no_bake_avatar")
+        if req.avatar_fps is not None:
+            command += ["--avatar_fps", str(req.avatar_fps)]
+        if req.avatar_loop_sec is not None:
+            command += ["--avatar_loop_sec", str(req.avatar_loop_sec)]
+        if req.avatar_loop_fade_sec is not None:
+            command += ["--avatar_loop_fade_sec", str(req.avatar_loop_fade_sec)]
+        if req.avatar_resize_factor is not None:
+            command += ["--avatar_resize_factor", str(req.avatar_resize_factor)]
+        if req.avatar_pads:
+            command += ["--avatar_pads", req.avatar_pads]
+        if req.avatar_batch_size is not None:
+            command += ["--avatar_batch_size", str(req.avatar_batch_size)]
+        if req.avatar_nosmooth:
+            command.append("--avatar_nosmooth")
+        if req.avatar_device:
+            command += ["--avatar_device", req.avatar_device]
+    else:
+        command = [
+            sys.executable,
+            str(PROJECT_ROOT / "src" / preprocess_script),
+            "--video",
+            str(video_path),
+            "--name",
+            profile,
+            "--profile_type",
+            PROFILE_TYPE_VOICE,
+        ]
     return StreamingResponse(
         _stream_subprocess(command, cwd=PROJECT_ROOT),
         media_type="text/plain",
@@ -1111,10 +1241,10 @@ def stream(req: GenerateRequest):
     start_time = time.perf_counter()
     profile_type = req.profile_type or PROFILE_TYPE_VOICE
     model_path = _resolve_model_path(req.model_path, req.speaker, profile_type)
-    config_path = _resolve_config_path(model_path, req.config_path)
-    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type)
-    params = _resolve_inference_params(model_path, req)
-    phonemizer_lang = _resolve_phonemizer_lang(model_path, req)
+    config_path = _resolve_config_path(model_path, req.config_path, req.speaker, profile_type)
+    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type, model_path)
+    params = _resolve_inference_params(model_path, req, req.speaker, profile_type)
+    phonemizer_lang = _resolve_phonemizer_lang(model_path, req, req.speaker, profile_type)
     lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker, profile_type)
     lexicon = _load_lexicon(lexicon_path)
 
@@ -1160,7 +1290,7 @@ def stream(req: GenerateRequest):
         if req.crossfade_ms is not None
         else profile.get("crossfade_ms", 8.0)
     )
-    chunks = _split_text(req.text, max_chars, max_words)
+    chunks = _split_text_warmup(req.text, max_chars, max_words)
     if not chunks:
         raise HTTPException(status_code=400, detail="Text is empty.")
     seed = req.seed if req.seed is not None else profile.get("seed")
@@ -1238,10 +1368,10 @@ def stream_avatar(req: GenerateRequest):
 
     profile_type = req.profile_type or PROFILE_TYPE_AVATAR
     model_path = _resolve_model_path(req.model_path, profile, profile_type)
-    config_path = _resolve_config_path(model_path, req.config_path)
-    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, profile, profile_type)
-    params = _resolve_inference_params(model_path, req)
-    phonemizer_lang = _resolve_phonemizer_lang(model_path, req)
+    config_path = _resolve_config_path(model_path, req.config_path, profile, profile_type)
+    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, profile, profile_type, model_path)
+    params = _resolve_inference_params(model_path, req, profile, profile_type)
+    phonemizer_lang = _resolve_phonemizer_lang(model_path, req, profile, profile_type)
     lexicon_path = _resolve_lexicon_path(model_path, req, profile, profile_type)
     lexicon = _load_lexicon(lexicon_path)
 
@@ -1252,6 +1382,10 @@ def stream_avatar(req: GenerateRequest):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     fps = req.avatar_fps or lipsync.fps
+    low_latency = bool(req.low_latency)
+    if low_latency:
+        fps = min(fps or 25.0, 20.0)
+        lipsync.fps = fps
 
     profile_defaults = _load_profile_defaults(model_path)
     max_chars = (
@@ -1264,6 +1398,9 @@ def stream_avatar(req: GenerateRequest):
         if req.max_chunk_words is not None
         else profile_defaults.get("max_chunk_words", DEFAULT_MAX_CHUNK_WORDS)
     )
+    if low_latency:
+        max_chars = min(max_chars, 180)
+        max_words = min(max_words, 22)
     pause_ms = (
         req.pause_ms
         if req.pause_ms is not None
@@ -1290,7 +1427,9 @@ def stream_avatar(req: GenerateRequest):
         else profile_defaults.get("smart_trim_pad_ms", 50.0)
     )
 
-    chunks = _split_text(req.text, max_chars, max_words)
+    warmup_words = 3 if low_latency else 4
+    warmup_scan = 6 if low_latency else 8
+    chunks = _split_text_warmup(req.text, max_chars, max_words, warmup_words, warmup_scan)
     if not chunks:
         raise HTTPException(status_code=400, detail="Text is empty.")
 
@@ -1300,60 +1439,89 @@ def stream_avatar(req: GenerateRequest):
     pause = np.zeros(int(engine.sample_rate * (pause_ms / 1000.0)), dtype=np.float32)
 
     def _generator() -> Iterator[str]:
-        for idx, chunk in enumerate(chunks):
-            if pad_text:
-                chunk = f"{pad_text_token} {chunk} {pad_text_token}"
-            audio = engine.generate(
-                chunk,
-                ref_wav_path=ref_wav_path,
-                alpha=params["alpha"],
-                beta=params["beta"],
-                diffusion_steps=params["diffusion_steps"],
-                embedding_scale=params["embedding_scale"],
-                f0_scale=params["f0_scale"],
-                phonemizer_lang=phonemizer_lang,
-                lexicon=lexicon,
-                seed=seed,
-            )
-            if smart_trim_db and smart_trim_db > 0:
-                audio = _smart_vad_trim(
-                    audio,
-                    engine.sample_rate,
-                    top_db=float(smart_trim_db),
-                    pad_ms=float(smart_trim_pad_ms),
-                )
-            audio = _remove_dc(audio.astype(np.float32, copy=False))
-            audio = _fade_edges(audio, engine.sample_rate, fade_ms=5.0)
-            if idx < len(chunks) - 1 and pause.size:
-                audio = np.concatenate([audio, pause])
+        queue_size = 3 if low_latency else 2
+        result_queue: queue.Queue[tuple[str, int, np.ndarray | None, np.ndarray | None]] = queue.Queue(
+            maxsize=queue_size
+        )
 
-            pitch_shift = (
-                req.pitch_shift
-                if req.pitch_shift is not None
-                else profile_defaults.get("pitch_shift", 0.0)
-            )
-            if pitch_shift:
-                audio = _apply_pitch_shift(audio, engine.sample_rate, pitch_shift)
-            de_esser_cutoff = (
-                req.de_esser_cutoff
-                if req.de_esser_cutoff is not None
-                else profile_defaults.get("de_esser_cutoff", 0.0)
-            )
-            de_esser_order = (
-                req.de_esser_order
-                if req.de_esser_order is not None
-                else profile_defaults.get("de_esser_order", 2)
-            )
-            if de_esser_cutoff:
-                audio = _apply_de_esser(audio, engine.sample_rate, de_esser_cutoff, int(de_esser_order))
-            audio = _soft_clip(audio)
+        def _audio_worker() -> None:
+            try:
+                for idx, chunk in enumerate(chunks):
+                    if pad_text:
+                        chunk = f"{pad_text_token} {chunk} {pad_text_token}"
+                    audio = engine.generate(
+                        chunk,
+                        ref_wav_path=ref_wav_path,
+                        alpha=params["alpha"],
+                        beta=params["beta"],
+                        diffusion_steps=params["diffusion_steps"],
+                        embedding_scale=params["embedding_scale"],
+                        f0_scale=params["f0_scale"],
+                        phonemizer_lang=phonemizer_lang,
+                        lexicon=lexicon,
+                        seed=seed,
+                    )
+                    if smart_trim_db and smart_trim_db > 0:
+                        audio = _smart_vad_trim(
+                            audio,
+                            engine.sample_rate,
+                            top_db=float(smart_trim_db),
+                            pad_ms=float(smart_trim_pad_ms),
+                        )
+                    audio = _remove_dc(audio.astype(np.float32, copy=False))
+                    audio = _fade_edges(audio, engine.sample_rate, fade_ms=5.0)
+                    if idx < len(chunks) - 1 and pause.size:
+                        audio = np.concatenate([audio, pause])
 
-            audio_16k = librosa.resample(audio, orig_sr=engine.sample_rate, target_sr=16000)
-            frames = lipsync.sync_chunk(audio_16k.astype(np.float32))
+                    pitch_shift = (
+                        req.pitch_shift
+                        if req.pitch_shift is not None
+                        else profile_defaults.get("pitch_shift", 0.0)
+                    )
+                    if pitch_shift:
+                        audio = _apply_pitch_shift(audio, engine.sample_rate, pitch_shift)
+                    de_esser_cutoff = (
+                        req.de_esser_cutoff
+                        if req.de_esser_cutoff is not None
+                        else profile_defaults.get("de_esser_cutoff", 0.0)
+                    )
+                    de_esser_order = (
+                        req.de_esser_order
+                        if req.de_esser_order is not None
+                        else profile_defaults.get("de_esser_order", 2)
+                    )
+                    if de_esser_cutoff:
+                        audio = _apply_de_esser(
+                            audio, engine.sample_rate, de_esser_cutoff, int(de_esser_order)
+                        )
+                    audio = _soft_clip(audio)
 
+                    audio_16k = librosa.resample(audio, orig_sr=engine.sample_rate, target_sr=16000)
+                    result_queue.put(("data", idx, audio, audio_16k.astype(np.float32)))
+                result_queue.put(("done", -1, None, None))
+            except Exception as exc:
+                result_queue.put(("error", -1, np.array([str(exc)], dtype=object), None))
+
+        threading.Thread(target=_audio_worker, daemon=True).start()
+
+        while True:
+            kind, idx, audio, audio_16k = result_queue.get()
+            if kind == "error":
+                detail = "Audio worker failed."
+                if audio is not None and audio.size > 0:
+                    detail = str(audio[0])
+                yield json.dumps({"event": "error", "detail": detail}) + "\n"
+                break
+            if kind == "done":
+                break
+
+            frames = lipsync.sync_chunk(audio_16k)
             frame_payloads = []
+            jpeg_quality = 60 if low_latency else 70
             for frame in frames:
-                ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                ok, buf = cv2.imencode(
+                    ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+                )
                 if ok:
                     frame_payloads.append(base64.b64encode(buf).decode("ascii"))
 
@@ -1382,10 +1550,10 @@ def generate(req: GenerateRequest):
     profile_type = req.profile_type or PROFILE_TYPE_VOICE
     model_path = _resolve_model_path(req.model_path, req.speaker, profile_type)
 
-    config_path = _resolve_config_path(model_path, req.config_path)
-    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type)
-    params = _resolve_inference_params(model_path, req)
-    phonemizer_lang = _resolve_phonemizer_lang(model_path, req)
+    config_path = _resolve_config_path(model_path, req.config_path, req.speaker, profile_type)
+    ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type, model_path)
+    params = _resolve_inference_params(model_path, req, req.speaker, profile_type)
+    phonemizer_lang = _resolve_phonemizer_lang(model_path, req, req.speaker, profile_type)
     lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker, profile_type)
     lexicon = _load_lexicon(lexicon_path)
 

@@ -28,6 +28,19 @@ def _smooth_boxes(boxes: np.ndarray, window: int = 5) -> np.ndarray:
     return smoothed.round().astype(np.int32)
 
 
+def _apply_loop_crossfade(frames: list[np.ndarray], fade_frames: int) -> list[np.ndarray]:
+    if fade_frames <= 0 or fade_frames * 2 >= len(frames):
+        return frames
+    total = len(frames)
+    for i in range(fade_frames):
+        alpha = float(i + 1) / float(fade_frames)
+        tail_idx = total - fade_frames + i
+        head_idx = i
+        blended = cv2.addWeighted(frames[tail_idx], 1.0 - alpha, frames[head_idx], alpha, 0)
+        frames[tail_idx] = blended
+    return frames
+
+
 def _load_detector(device: str = "cuda"):
     lip_dir = LIP_SYNCING_DIR / "lib" / "Wav2Lip"
     if not lip_dir.exists():
@@ -46,6 +59,7 @@ def bake_avatar(
     profile_type: str = PROFILE_TYPE_AVATAR,
     fps: float = 25.0,
     loop_sec: float = 10.0,
+    loop_fade_sec: float = 1.0,
     resize_factor: int = 1,
     pads: tuple[int, int, int, int] = (0, 10, 0, 0),
     batch_size: int = 16,
@@ -83,6 +97,10 @@ def bake_avatar(
     cap.release()
     if not frames:
         raise RuntimeError("No frames extracted for avatar baking.")
+
+    if loop_fade_sec and fps:
+        fade_frames = int(round(loop_fade_sec * fps))
+        frames = _apply_loop_crossfade(frames, fade_frames)
 
     detector = _load_detector(device)
     preds: list[np.ndarray | None] = []
@@ -125,6 +143,7 @@ def bake_avatar(
         "frame_count": len(frames),
         "resize_factor": resize_factor,
         "pads": list(pads),
+        "loop_fade_sec": float(loop_fade_sec),
         "width": int(frames[0].shape[1]),
         "height": int(frames[0].shape[0]),
     }
@@ -144,6 +163,7 @@ def main() -> None:
     )
     parser.add_argument("--fps", type=float, default=25.0)
     parser.add_argument("--loop_sec", type=float, default=10.0)
+    parser.add_argument("--loop_fade_sec", type=float, default=1.0)
     parser.add_argument("--resize_factor", type=int, default=1)
     parser.add_argument("--pads", type=str, default="0 10 0 0")
     parser.add_argument("--batch_size", type=int, default=16)
@@ -161,6 +181,7 @@ def main() -> None:
         profile_type=args.profile_type,
         fps=args.fps,
         loop_sec=args.loop_sec,
+        loop_fade_sec=args.loop_fade_sec,
         resize_factor=args.resize_factor,
         pads=pads,
         batch_size=args.batch_size,

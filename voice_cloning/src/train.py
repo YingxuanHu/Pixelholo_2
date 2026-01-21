@@ -201,6 +201,7 @@ def _patch_config(
     config["max_len"] = max_len
     config["fp16_run"] = fp16_run
     config["epochs"] = epochs
+    config["save_freq"] = 1
     config["num_workers"] = config.get("num_workers", 0)
     config["val_num_workers"] = config.get("val_num_workers", 0)
 
@@ -338,13 +339,13 @@ def main() -> None:
     parser.add_argument(
         "--early_stop_min_epoch",
         type=int,
-        default=8,
+        default=10,
         help="Do not early-stop before this epoch.",
     )
     parser.add_argument(
         "--early_stop_patience",
         type=int,
-        default=3,
+        default=0,
         help="Number of sweet-spot epochs before stopping.",
     )
     parser.add_argument(

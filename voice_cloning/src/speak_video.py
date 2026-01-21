@@ -52,9 +52,9 @@ def main() -> None:
 
     parser.add_argument(
         "--lipsync_mode",
-        choices=("chunked", "lib"),
-        default="chunked",
-        help="Chunked (fast start) or lib (single-pass, cached).",
+        choices=("chunked", "lib", "cached"),
+        default="cached",
+        help="Chunked (stream), lib (full video), cached (fast, uses avatar cache).",
     )
     parser.add_argument(
         "--lipsync_dir",
@@ -106,7 +106,7 @@ def main() -> None:
         )
 
     audio_dir = inference_audio_dir(args.profile, args.profile_type)
-    video_dir = inference_video_dir(args.profile, args.profile_type)
+    video_dir = inference_video_dir(args.profile, PROFILE_TYPE_AVATAR)
     audio_dir.mkdir(parents=True, exist_ok=True)
     video_dir.mkdir(parents=True, exist_ok=True)
 
@@ -174,6 +174,28 @@ def main() -> None:
             "--checkpoint",
             str(wav2lip_ckpt),
         ]
+    elif args.lipsync_mode == "cached":
+        runner = Path(__file__).with_name("run_lipsync_fast.py")
+        if args.profile_type != PROFILE_TYPE_AVATAR:
+            raise ValueError("cached lipsync mode requires an avatar profile.")
+        cmd = [
+            str(python_exec),
+            str(runner),
+            "--profile",
+            args.profile,
+            "--profile_type",
+            args.profile_type,
+            "--audio",
+            str(audio_out),
+            "--output",
+            str(video_out),
+            "--checkpoint",
+            str(wav2lip_ckpt),
+            "--wav2lip_batch_size",
+            str(args.wav2lip_batch_size),
+            "--fourcc",
+            args.fourcc,
+        ]
     else:
         runner = lipsync_dir / "src" / "run_lipsync_lib.py"
         cmd = [
@@ -187,6 +209,18 @@ def main() -> None:
             str(video_out),
             "--checkpoint",
             str(wav2lip_ckpt),
+            "--wav2lip_dir",
+            str(wav2lip_dir),
+            "--resize_factor",
+            str(args.resize_factor),
+            "--fourcc",
+            args.fourcc,
+            "--face_det_batch_size",
+            str(args.face_det_batch_size),
+            "--wav2lip_batch_size",
+            str(args.wav2lip_batch_size),
+            "--pads",
+            args.pads,
             "--cache_dir",
             str(lipsync_dir / "outputs" / "cache"),
             "--save_cache",

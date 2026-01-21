@@ -122,5 +122,4 @@ def inference_audio_dir(profile: str, profile_type: str | None = None) -> Path:
 
 
 def inference_video_dir(profile: str, profile_type: str | None = None) -> Path:
-    normalized = _normalize_profile_type(profile_type)
-    return OUTPUTS_DIR / INFERENCE_VIDEO_DIRNAME / normalized / profile
+    return OUTPUTS_DIR / INFERENCE_VIDEO_DIRNAME / PROFILE_TYPE_AVATAR / profile
