@@ -54,7 +54,7 @@ def main() -> None:
     engine.load_profile(args.profile, args.profile_type)
 
     audio_16k, _ = librosa.load(str(args.audio), sr=16000, mono=True)
-    frames = engine.sync_chunk(audio_16k)
+    frames = engine.sync_chunk(audio_16k, fps=engine.fps)
     if not frames:
         raise RuntimeError("No frames generated from Wav2Lip.")
 

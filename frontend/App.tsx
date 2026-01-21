@@ -25,6 +25,8 @@ type TrainParams = {
   maxLen: number;
 };
 
+type TrainMode = 'fast' | 'quality';
+
 const createLog = (message: string, level: LogEntry['level'] = 'info'): LogEntry => ({
   id: Math.random().toString(36).slice(2, 10),
   timestamp: new Date().toLocaleTimeString([], {
@@ -48,6 +50,11 @@ const defaultTrainParams: TrainParams = {
   batchSize: 2,
   epochs: 25,
   maxLen: 400,
+};
+
+const trainPresets: Record<TrainMode, TrainParams> = {
+  fast: { batchSize: 2, epochs: 12, maxLen: 300 },
+  quality: { batchSize: 2, epochs: 25, maxLen: 400 },
 };
 
 const App: React.FC = () => {
@@ -76,6 +83,8 @@ const App: React.FC = () => {
   const [inferenceStageIndex, setInferenceStageIndex] = useState<number | null>(null);
   const [trainFlags, setTrainFlags] = useState<TrainFlags>(defaultFlags);
   const [trainParams, setTrainParams] = useState<TrainParams>(defaultTrainParams);
+  const [trainMode, setTrainMode] = useState<TrainMode>('fast');
+  const [showAdvancedTrain, setShowAdvancedTrain] = useState(false);
   const [inferenceText, setInferenceText] = useState('');
   const [inferenceChunks, setInferenceChunks] = useState<InferenceChunk[]>([]);
   const [latency, setLatency] = useState<{ ttfa: number; total: number } | null>(null);
@@ -96,8 +105,13 @@ const App: React.FC = () => {
   const videoRafRef = useRef<number | null>(null);
   const videoStartTimeRef = useRef<number | null>(null);
   const videoNextFrameTimeRef = useRef<number | null>(null);
+  const audioStartDelayRef = useRef<number>(0.05);
   const videoFpsRef = useRef<number>(25);
   const frameQueueRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    setTrainParams(trainPresets[trainMode]);
+  }, [trainMode]);
 
   useEffect(() => {
     const cached = localStorage.getItem('voxclone_api_base');
@@ -584,7 +598,7 @@ const App: React.FC = () => {
     const fadeMs = 12;
     const fadeTime = Math.min(fadeMs / 1000, Math.max(0.003, buffer.duration / 4));
     const overlap = fadeTime;
-    const startAt = Math.max(ctx.currentTime + 0.05, nextStartTimeRef.current);
+    const startAt = Math.max(ctx.currentTime + audioStartDelayRef.current, nextStartTimeRef.current);
     const endAt = startAt + buffer.duration;
 
     const fadeSamples = Math.max(32, Math.floor(ctx.sampleRate * fadeTime));
@@ -616,6 +630,7 @@ const App: React.FC = () => {
     setLatency(null);
     setInferenceStageIndex(inferenceSteps.length > 0 ? 0 : null);
     nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
+    audioStartDelayRef.current = outputMode === 'avatar' ? 0.35 : 0.05;
     let sawError = false;
 
     if (streamAbortRef.current) {
@@ -636,7 +651,6 @@ const App: React.FC = () => {
     };
     if (outputMode === 'avatar') {
       payload.avatar_profile = profile.name;
-      payload.low_latency = true;
     }
 
     try {
@@ -1121,59 +1135,100 @@ const App: React.FC = () => {
             >
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="md:col-span-1 bg-slate-50 p-6 rounded-2xl border border-slate-100 space-y-6">
-                  <div>
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">Training Hyperparams</p>
-                    <div className="space-y-3">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-bold text-slate-600">Batch Size</span>
-                        <input
-                          type="number"
-                          min={1}
-                          value={trainParams.batchSize}
-                          onChange={(e) => setTrainParams(prev => ({ ...prev, batchSize: Number(e.target.value) }))}
-                          className="text-xs font-mono font-bold bg-white px-2 py-1 rounded w-20 text-right"
-                        />
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-bold text-slate-600">Epochs</span>
-                        <input
-                          type="number"
-                          min={1}
-                          value={trainParams.epochs}
-                          onChange={(e) => setTrainParams(prev => ({ ...prev, epochs: Number(e.target.value) }))}
-                          className="text-xs font-mono font-bold bg-white px-2 py-1 rounded w-20 text-right"
-                        />
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-bold text-slate-600">Max Len</span>
-                        <input
-                          type="number"
-                          min={1}
-                          value={trainParams.maxLen}
-                          onChange={(e) => setTrainParams(prev => ({ ...prev, maxLen: Number(e.target.value) }))}
-                          className="text-xs font-mono font-bold bg-white px-2 py-1 rounded w-20 text-right"
-                        />
-                      </div>
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Training Mode</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setTrainMode('fast')}
+                        className={`px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                          trainMode === 'fast'
+                            ? 'bg-teal-600 text-white shadow-lg shadow-teal-600/20'
+                            : 'bg-white text-slate-500'
+                        }`}
+                      >
+                        Fast
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTrainMode('quality')}
+                        className={`px-3 py-2 rounded-xl text-xs font-bold transition-all ${
+                          trainMode === 'quality'
+                            ? 'bg-slate-900 text-white shadow-lg'
+                            : 'bg-white text-slate-500'
+                        }`}
+                      >
+                        High Quality
+                      </button>
                     </div>
+                    <p className="text-[11px] text-slate-500">
+                      {trainMode === 'fast'
+                        ? 'Fewer epochs for quick iteration.'
+                        : 'Longer run with higher fidelity.'}
+                    </p>
                   </div>
 
-                  <div className="space-y-2 text-xs font-semibold text-slate-600">
-                    {[
-                      ['Auto-select epoch', 'autoSelectEpoch'],
-                      ['Auto-tune profile', 'autoTuneProfile'],
-                      ['Build lexicon', 'autoBuildLexicon'],
-                      ['Early stop', 'earlyStop'],
-                    ].map(([label, key]) => (
-                      <label key={key} className="flex items-center justify-between">
-                        <span>{label}</span>
-                        <input
-                          type="checkbox"
-                          checked={(trainFlags as any)[key]}
-                          onChange={(e) => setTrainFlags(prev => ({ ...prev, [key]: e.target.checked }))}
-                          className="accent-teal-600"
-                        />
-                      </label>
-                    ))}
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvancedTrain(prev => !prev)}
+                      className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2"
+                    >
+                      Advanced Parameters
+                      <span className="text-[9px] text-slate-500">{showAdvancedTrain ? 'Hide' : 'Show'}</span>
+                    </button>
+                    {showAdvancedTrain && (
+                      <div className="mt-4 space-y-3">
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-bold text-slate-600">Batch Size</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={trainParams.batchSize}
+                            onChange={(e) => setTrainParams(prev => ({ ...prev, batchSize: Number(e.target.value) }))}
+                            className="text-xs font-mono font-bold bg-white px-2 py-1 rounded w-20 text-right"
+                          />
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-bold text-slate-600">Epochs</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={trainParams.epochs}
+                            onChange={(e) => setTrainParams(prev => ({ ...prev, epochs: Number(e.target.value) }))}
+                            className="text-xs font-mono font-bold bg-white px-2 py-1 rounded w-20 text-right"
+                          />
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs font-bold text-slate-600">Max Len</span>
+                          <input
+                            type="number"
+                            min={1}
+                            value={trainParams.maxLen}
+                            onChange={(e) => setTrainParams(prev => ({ ...prev, maxLen: Number(e.target.value) }))}
+                            className="text-xs font-mono font-bold bg-white px-2 py-1 rounded w-20 text-right"
+                          />
+                        </div>
+                        <div className="space-y-2 text-xs font-semibold text-slate-600">
+                          {[
+                            ['Auto-select epoch', 'autoSelectEpoch'],
+                            ['Auto-tune profile', 'autoTuneProfile'],
+                            ['Build lexicon', 'autoBuildLexicon'],
+                            ['Early stop', 'earlyStop'],
+                          ].map(([label, key]) => (
+                            <label key={key} className="flex items-center justify-between">
+                              <span>{label}</span>
+                              <input
+                                type="checkbox"
+                                checked={(trainFlags as any)[key]}
+                                onChange={(e) => setTrainFlags(prev => ({ ...prev, [key]: e.target.checked }))}
+                                className="accent-teal-600"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <button
@@ -1237,8 +1292,8 @@ const App: React.FC = () => {
                       <span className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Avatar Preview</span>
                       <span className="text-[10px] font-bold text-teal-300">{outputMode === 'avatar' ? `${videoFps} FPS · ${videoQueue} queued` : 'disabled'}</span>
                     </div>
-                    <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[240px]">
-                      <canvas ref={videoCanvasRef} width={480} height={480} className="w-full h-full" />
+                    <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[240px] w-full max-w-[320px] mx-auto">
+                      <canvas ref={videoCanvasRef} width={360} height={480} className="w-full h-full" />
                     </div>
                     <div className="mt-3 text-[11px] text-slate-400 flex items-center justify-between">
                       <span>Status: <span className="font-semibold text-slate-200">{videoState}</span></span>

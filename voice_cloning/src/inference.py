@@ -156,6 +156,42 @@ def _split_text_warmup(
     return chunks
 
 
+def _split_text_staircase(
+    text: str,
+    max_chars: int,
+    max_words: int,
+    limits: list[int] | None = None,
+    lookback: int = 5,
+) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    limits = limits or [4, 10, 25]
+    chunks: list[str] = []
+    cursor = 0
+    step = 0
+    total = len(words)
+    while cursor < total:
+        limit = limits[step] if step < len(limits) else limits[-1]
+        limit = min(limit, max_words)
+        end = min(cursor + limit, total)
+        if end < total:
+            for i in range(end - 1, max(cursor, end - lookback), -1):
+                if words[i][-1] in ",.!?;":
+                    end = i + 1
+                    break
+        candidate = " ".join(words[cursor:end])
+        while candidate and len(candidate) > max_chars and end > cursor + 1:
+            end -= 1
+            candidate = " ".join(words[cursor:end])
+        if not candidate:
+            break
+        chunks.append(candidate)
+        cursor = end
+        step += 1
+    return chunks
+
+
 def _apply_pitch_shift(
     audio: np.ndarray,
     sample_rate: int,
@@ -723,7 +759,6 @@ class GenerateRequest(BaseModel):
     crossfade_ms: float | None = None
     avatar_profile: str | None = None
     avatar_fps: float | None = None
-    low_latency: bool | None = None
     return_base64: bool = False
 
 
@@ -1382,10 +1417,6 @@ def stream_avatar(req: GenerateRequest):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     fps = req.avatar_fps or lipsync.fps
-    low_latency = bool(req.low_latency)
-    if low_latency:
-        fps = min(fps or 25.0, 20.0)
-        lipsync.fps = fps
 
     profile_defaults = _load_profile_defaults(model_path)
     max_chars = (
@@ -1398,9 +1429,6 @@ def stream_avatar(req: GenerateRequest):
         if req.max_chunk_words is not None
         else profile_defaults.get("max_chunk_words", DEFAULT_MAX_CHUNK_WORDS)
     )
-    if low_latency:
-        max_chars = min(max_chars, 180)
-        max_words = min(max_words, 22)
     pause_ms = (
         req.pause_ms
         if req.pause_ms is not None
@@ -1427,9 +1455,7 @@ def stream_avatar(req: GenerateRequest):
         else profile_defaults.get("smart_trim_pad_ms", 50.0)
     )
 
-    warmup_words = 3 if low_latency else 4
-    warmup_scan = 6 if low_latency else 8
-    chunks = _split_text_warmup(req.text, max_chars, max_words, warmup_words, warmup_scan)
+    chunks = _split_text_staircase(req.text, max_chars, max_words, [4, 10, 25])
     if not chunks:
         raise HTTPException(status_code=400, detail="Text is empty.")
 
@@ -1439,9 +1465,8 @@ def stream_avatar(req: GenerateRequest):
     pause = np.zeros(int(engine.sample_rate * (pause_ms / 1000.0)), dtype=np.float32)
 
     def _generator() -> Iterator[str]:
-        queue_size = 3 if low_latency else 2
         result_queue: queue.Queue[tuple[str, int, np.ndarray | None, np.ndarray | None]] = queue.Queue(
-            maxsize=queue_size
+            maxsize=3
         )
 
         def _audio_worker() -> None:
@@ -1470,7 +1495,8 @@ def stream_avatar(req: GenerateRequest):
                         )
                     audio = _remove_dc(audio.astype(np.float32, copy=False))
                     audio = _fade_edges(audio, engine.sample_rate, fade_ms=5.0)
-                    if idx < len(chunks) - 1 and pause.size:
+                    is_sentence_end = chunk.rstrip().endswith((".", "!", "?", ";", ":"))
+                    if is_sentence_end and pause.size:
                         audio = np.concatenate([audio, pause])
 
                     pitch_shift = (
@@ -1515,9 +1541,9 @@ def stream_avatar(req: GenerateRequest):
             if kind == "done":
                 break
 
-            frames = lipsync.sync_chunk(audio_16k)
+            frames = lipsync.sync_chunk(audio_16k, fps=fps)
             frame_payloads = []
-            jpeg_quality = 60 if low_latency else 70
+            jpeg_quality = 70
             for frame in frames:
                 ok, buf = cv2.imencode(
                     ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]

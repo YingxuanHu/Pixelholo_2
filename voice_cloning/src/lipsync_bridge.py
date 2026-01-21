@@ -22,6 +22,7 @@ class LipSyncBridge:
         self.img_size = img_size
         self.wav2lip_batch_size = wav2lip_batch_size
         self.frame_idx = 0
+        self.frame_accumulator = 0.0
         self.frames: np.ndarray | None = None
         self.coords: np.ndarray | None = None
         self.fps: float = 25.0
@@ -93,13 +94,13 @@ class LipSyncBridge:
                 pass
         self.frame_idx = 0
 
-    def _mel_chunks(self, audio_16k: np.ndarray) -> list[np.ndarray]:
+    def _mel_chunks(self, audio_16k: np.ndarray, fps: float | None = None) -> list[np.ndarray]:
         mel = self._wav_audio.melspectrogram(audio_16k)
         if np.isnan(mel.reshape(-1)).sum() > 0:
             raise ValueError("Mel contains NaN.")
         mel_step_size = 16
         mel_chunks = []
-        mel_idx_multiplier = 80.0 / float(self.fps or 25.0)
+        mel_idx_multiplier = 80.0 / float(fps or self.fps or 25.0)
         i = 0
         while True:
             start_idx = int(i * mel_idx_multiplier)
@@ -140,14 +141,25 @@ class LipSyncBridge:
         mel_batch = np.reshape(mel_batch, [len(mel_batch), mel_batch.shape[1], mel_batch.shape[2], 1])
         return img_batch, mel_batch, frame_batch, coord_batch
 
-    def sync_chunk(self, audio_16k: np.ndarray) -> list[np.ndarray]:
+    def sync_chunk(self, audio_16k: np.ndarray, fps: float | None = None) -> list[np.ndarray]:
         if self.frames is None or self.coords is None:
             raise RuntimeError("Avatar cache not loaded.")
         if audio_16k.size == 0:
             return []
-        mel_chunks = self._mel_chunks(audio_16k)
+        fps = fps or self.fps or 25.0
+        mel_chunks = self._mel_chunks(audio_16k, fps=fps)
         if not mel_chunks:
             return []
+        expected_frames = (len(audio_16k) / 16000.0) * fps
+        total_frames = expected_frames + self.frame_accumulator
+        target_frames = int(total_frames)
+        self.frame_accumulator = total_frames - target_frames
+        if target_frames <= 0:
+            return []
+        if len(mel_chunks) > target_frames:
+            mel_chunks = mel_chunks[:target_frames]
+        elif len(mel_chunks) < target_frames:
+            mel_chunks.extend([mel_chunks[-1]] * (target_frames - len(mel_chunks)))
         frames = []
         coords = []
         for _ in mel_chunks:
