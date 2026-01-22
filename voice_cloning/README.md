@@ -27,8 +27,7 @@ Choose a mode:
 ```bash
 python src/preprocess.py \
   --video /path/to/me.mp4 \
-  --name alvin \
-  --profile_type voice
+  --name alvin
 ```
 
 ### 1b) Preprocess (video -> dataset + avatar cache)

@@ -437,12 +437,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Process a video into StyleTTS2-ready chunks.")
     parser.add_argument("--video", required=True, type=Path, help="Path to input video (.mp4)")
     parser.add_argument("--name", required=True, help="Speaker name")
-    parser.add_argument(
-        "--profile_type",
-        choices=[PROFILE_TYPE_VOICE],
-        default=PROFILE_TYPE_VOICE,
-        help="Profile type for voice-only preprocessing.",
-    )
     parser.add_argument("--model_size", default=DEFAULT_MODEL_SIZE, help="faster-whisper model size")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help="Device for faster-whisper")
     parser.add_argument("--compute_type", default=DEFAULT_COMPUTE_TYPE, help="Compute type for faster-whisper")
