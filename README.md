@@ -12,7 +12,7 @@ PixelHolo is a low-latency AI avatar system that clones voices (StyleTTS2) and s
 - Avatar Baking: Precompute face boxes and frames once so streaming avoids live face detection.
 - Staircase Chunking: 4 words -> 10 words -> 25 words for fast first frame and steady buffering.
 
-## Quickstart (Happy Path)
+## Quickstart
 
 Prereqs: Linux (Ubuntu 22.04+), NVIDIA GPU (8GB+), Python 3.12, Node 18+, `ffmpeg`, `espeak-ng`.
 Model downloads are documented in `voice_cloning/README.md` and `lip_syncing/README.md`.
