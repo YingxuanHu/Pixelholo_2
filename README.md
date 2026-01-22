@@ -1,69 +1,36 @@
-## Layout
-- `frontend/` - UI control panel (Vite/React)
-- `voice_cloning/` - StyleTTS2 training + inference + API
-- `lip_syncing/` - Wav2Lip chunked and single-pass runners
-- `reference/` - legacy UI reference (not used in production)
+# PixelHolo
 
+PixelHolo is a low-latency AI avatar system that clones voices (StyleTTS2) and syncs lips (Wav2Lip) in real-time. It is designed for interactive chatbots with instant streaming using Staircase Chunking and Avatar Baking.
 
-## TL;DR Quickstart
-```bash
-# Voice cloning
-cd /home/alvin/PixelHolo_trial/voice_cloning
-source .venv/bin/activate
-python src/preprocess.py --video /path/to/user.mp4 --name alice --profile_type voice
-python src/train.py --dataset_path ./data/voice_profiles/alice --profile_type voice
-python src/speak.py --profile alice --profile_type voice --text "Hello"
+## System Architecture
+- `frontend/` - React/Vite UI for chatting with the avatar.
+- `voice_cloning/` - The brain: voice training, text-to-speech, and orchestration.
+- `lip_syncing/` - The engine: Wav2Lip inference runners (standalone or bridged).
+- `reference/` - legacy UI reference (not used).
 
-# Voice + lip sync video
-python src/preprocess_video.py --video /path/to/user.mp4 --name alice
-python src/train.py --dataset_path ./data/avatar_profiles/alice --profile_type avatar
-python src/speak_video.py --profile alice --text "Hello from video"
+## Concepts
+- Avatar Baking: Precompute face boxes and frames once so streaming avoids live face detection.
+- Staircase Chunking: 4 words -> 10 words -> 25 words for fast first frame and steady buffering.
 
-# Frontend
-cd /home/alvin/PixelHolo_trial/frontend
-npm run dev
-```
-## Requirements
-- Linux + NVIDIA GPU recommended
-- `ffmpeg` and `espeak-ng` installed system-wide
-- Python 3.12 for `voice_cloning/`
-- Node 18+ for `frontend/`
+## Quickstart (Happy Path)
 
-## One-time setup
-1) Voice cloning
+Prereqs: Linux (Ubuntu 22.04+), NVIDIA GPU (8GB+), Python 3.12, Node 18+, `ffmpeg`, `espeak-ng`.
+Model downloads are documented in `voice_cloning/README.md` and `lip_syncing/README.md`.
+
+1) Voice engine
 ```bash
 cd /home/alvin/PixelHolo_trial/voice_cloning
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
-If `python` isn't available on your system, use `python3 -m venv .venv` and `.venv/bin/python -m pip install -r requirements.txt`.
 
-Clone StyleTTS2 and download LibriTTS weights:
-```bash
-mkdir -p lib
-cd lib
-git clone https://github.com/yl4579/StyleTTS2.git
-mkdir -p StyleTTS2/Models/LibriTTS
-wget -O StyleTTS2/Models/LibriTTS/epochs_2nd_00020.pth   https://huggingface.co/yl4579/StyleTTS2-LibriTTS/resolve/main/Models/LibriTTS/epochs_2nd_00020.pth
-wget -O StyleTTS2/Models/LibriTTS/config.yml   https://huggingface.co/yl4579/StyleTTS2-LibriTTS/resolve/main/Models/LibriTTS/config.yml
-```
-
-2) Lip syncing
+2) Lip sync engine
 ```bash
 cd /home/alvin/PixelHolo_trial/lip_syncing
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-```
-If `python` isn't available on your system, use `python3 -m venv .venv` and `.venv/bin/python -m pip install -r requirements.txt`.
-
-Clone Wav2Lip and download checkpoints:
-```bash
-git clone https://github.com/Rudrabha/Wav2Lip.git lib/Wav2Lip
-# Place these files in lip_syncing/models/
-# - s3fd-619a316812.pth
-# - wav2lip_gan.pth
 ```
 
 3) Frontend
@@ -72,77 +39,37 @@ cd /home/alvin/PixelHolo_trial/frontend
 npm install
 ```
 
-## Quick start (CLI)
-1) Preprocess a video (builds voice dataset + avatar cache)
-```bash
-python /home/alvin/PixelHolo_trial/voice_cloning/src/preprocess.py   --video /path/to/user.mp4   --name alice --profile_type voice
-```
-
-2) Train
-```bash
-python /home/alvin/PixelHolo_trial/voice_cloning/src/train.py   --dataset_path /home/alvin/PixelHolo_trial/voice_cloning/data/voice_profiles/alice --profile_type voice
-```
-
-3) Voice inference (audio)
-```bash
-python /home/alvin/PixelHolo_trial/voice_cloning/src/speak.py   --profile alice   --text "Hello world"
-```
-
-4) Voice + lip sync (video)
-```bash
-python /home/alvin/PixelHolo_trial/voice_cloning/src/preprocess_video.py   --video /path/to/user.mp4   --name alice
-python /home/alvin/PixelHolo_trial/voice_cloning/src/train.py   --dataset_path /home/alvin/PixelHolo_trial/voice_cloning/data/avatar_profiles/alice --profile_type avatar
-python /home/alvin/PixelHolo_trial/voice_cloning/src/speak_video.py   --profile alice   --text "Hello from video"
-```
-
-## Quick start (API + frontend)
-Backend:
+4) Create a profile (video -> voice + avatar cache)
 ```bash
 cd /home/alvin/PixelHolo_trial/voice_cloning
 source .venv/bin/activate
-uvicorn src.inference:app --host 0.0.0.0 --port 8000
+python src/preprocess_video.py --video /path/to/my_video.mp4 --name alvin
 ```
 
-Frontend:
+5) Train (recommended sprint)
 ```bash
+python src/train.py --dataset_path data/avatar_profiles/alvin --profile_type avatar --epochs 25
+```
+
+6) Run streaming
+```bash
+# Terminal 1 (backend)
+cd /home/alvin/PixelHolo_trial/voice_cloning
+uvicorn src.inference:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 (frontend)
 cd /home/alvin/PixelHolo_trial/frontend
 npm run dev
 ```
+Open http://localhost:5173
 
-## Data and outputs
-All outputs live under `voice_cloning/`:
-```
-voice_cloning/
-  data/
-    voice_profiles/<profile>/        # audio-only dataset
-    avatar_profiles/<profile>/       # video-enabled dataset (includes avatar_cache/)
-  outputs/
-    training/
-      voice/<profile>/               # checkpoints + config_ft.yml + profile.json
-      avatar/<profile>/              # same, but for avatar profiles
-    audio/
-      voice/<profile>/               # generated wav (speak.py, auto-select samples)
-      avatar/<profile>/              # generated wav for avatar runs
-    video/
-      avatar/<profile>/              # generated lip-sync mp4
-```
-
-What the files mean:
-- `profile.json` - inference defaults (model path, ref wav, alpha/beta, f0_scale).
-- `best_epoch.txt` - pointer to the selected checkpoint.
-- `epoch_scores.json` - full scoring history from auto-select.
-- `f0_scale.txt` - auto-estimated pitch scale.
-
-## Notes
-- `voice_cloning` will look for `lip_syncing` as a sibling folder under the repo root.
-- `preprocess.py` bakes avatar frames for lip sync by default.
-- `frontend` can run voice-only or voice+lip-sync using the same backend.
-
+## Key Features
+- Voice cloning with StyleTTS2 fine-tuning.
+- Real-time lip sync with Wav2Lip.
+- Baked avatars for zero face-detect latency.
+- Staircase chunking for stable streaming.
 
 ## Troubleshooting
-- **CUDA / cuDNN load errors**: ensure `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` are installed in the venv and `LD_LIBRARY_PATH` includes their `lib` folders.
-- **Whisper GPU errors**: confirm `torch` and `cuda` versions match your driver.
-- **Phonemizer errors**: install `espeak-ng` system-wide.
-- **ffmpeg missing**: install `ffmpeg` and ensure it is on PATH.
-- **Lip sync models not found**: confirm `lip_syncing/models/s3fd-619a316812.pth` and `lip_syncing/models/wav2lip_gan.pth` exist.
-- **uvicorn not executable**: reinstall in the venv (`python -m pip install --force-reinstall uvicorn`) or run `python -m uvicorn ...`.
+- Permission errors: activate the correct `.venv` in each repo.
+- Audio but no video: confirm `lip_syncing/models/wav2lip_gan.pth` exists.
+- Stream stalling: ensure GPU VRAM headroom and stable network.
