@@ -63,6 +63,11 @@ npm run dev
 ```
 Open http://localhost:5173
 
+Optional (LLM chat): create `/home/alvin/PixelHolo_trial/.env` with:
+```
+GROQ_API_KEY=your_key_here
+```
+
 ## Key Features
 - Voice cloning with StyleTTS2 fine-tuning.
 - Real-time lip sync with Wav2Lip.
