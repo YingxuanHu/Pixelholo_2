@@ -51,5 +51,6 @@ voice_cloning/lib/StyleTTS2/
 # Frontend artifacts
 frontend/.env*
 
-# Reference / scratch
+.env
+.env.*
 reference/
