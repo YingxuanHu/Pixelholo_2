@@ -5,7 +5,7 @@ This module handles voice cloning (StyleTTS2) and orchestrates the full pipeline
 ## Key Concepts
 
 ### Avatar Baking
-Real-time face detection is too slow. Baking happens once during preprocessing
+Real-time face detection is too slow. Baking happens once during preprocessing:
 1) Extract a short loop from the video.
 2) Run face detection on each frame offline.
 3) Save `frames.npy` and `coords.npy`.
