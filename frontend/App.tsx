@@ -97,6 +97,9 @@ const App: React.FC = () => {
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextStartTimeRef = useRef<number>(0);
+  const audioEndTimeRef = useRef<number>(0);
+  const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const audioUnlockedRef = useRef<boolean>(false);
   const streamAbortRef = useRef<AbortController | null>(null);
   const isBusy = Object.values(stepStatuses).some(status => status === 'running');
   const warmedProfilesRef = useRef<Set<string>>(new Set());
@@ -107,7 +110,7 @@ const App: React.FC = () => {
   const videoNextFrameTimeRef = useRef<number | null>(null);
   const audioStartDelayRef = useRef<number>(0.05);
   const videoFpsRef = useRef<number>(25);
-  const frameQueueRef = useRef<string[]>([]);
+  const frameQueueRef = useRef<{ img: string; t: number }[]>([]);
 
   useEffect(() => {
     setTrainParams(trainPresets[trainMode]);
@@ -116,6 +119,16 @@ const App: React.FC = () => {
   useEffect(() => {
     const cached = localStorage.getItem('voxclone_api_base');
     if (cached) setApiBase(cached);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === 'visible') {
+        unlockAudio();
+      }
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
   }, []);
 
   useEffect(() => {
@@ -486,20 +499,54 @@ const App: React.FC = () => {
   };
 
   const ensureAudioContext = async () => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+      audioContextRef.current = new Ctx();
     }
-    if (audioContextRef.current.state === 'suspended') {
-      await audioContextRef.current.resume();
+    if (audioContextRef.current.state !== 'running') {
+      try {
+        await audioContextRef.current.resume();
+      } catch {
+        // Safari may block without a user gesture.
+      }
     }
   };
 
-  const resetAudio = async () => {
-    if (audioContextRef.current) {
-      await audioContextRef.current.close();
-      audioContextRef.current = null;
+  const unlockAudio = async () => {
+    await ensureAudioContext();
+    const ctx = audioContextRef.current;
+    if (!ctx || audioUnlockedRef.current) return;
+    try {
+      // Play a silent buffer to "unlock" Safari audio output.
+      const buffer = ctx.createBuffer(1, 1, ctx.sampleRate);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
+      audioUnlockedRef.current = true;
+    } catch {
+      // ignore
     }
+  };
+
+  const stopAllAudio = () => {
+    for (const src of activeSourcesRef.current) {
+      try {
+        src.stop(0);
+      } catch {}
+    }
+    activeSourcesRef.current.clear();
     nextStartTimeRef.current = 0;
+    audioEndTimeRef.current = 0;
+  };
+
+  const resetAudio = async () => {
+    stopAllAudio();
+    if (audioContextRef.current?.state === 'running') {
+      try {
+        await audioContextRef.current.suspend();
+      } catch {}
+    }
   };
 
   const resetVideo = useCallback(() => {
@@ -551,16 +598,12 @@ const App: React.FC = () => {
           videoNextFrameTimeRef.current = startAt;
         }
         const now = ctx.currentTime;
-        while (
-          videoNextFrameTimeRef.current !== null &&
-          now >= videoNextFrameTimeRef.current &&
-          frameQueueRef.current.length > 0
-        ) {
-          const nextFrame = frameQueueRef.current.shift();
-          if (nextFrame) {
-            drawFrame(nextFrame);
-          }
-          videoNextFrameTimeRef.current += frameInterval;
+        let frameToDraw: { img: string; t: number } | null = null;
+        while (frameQueueRef.current.length > 0 && frameQueueRef.current[0].t <= now) {
+          frameToDraw = frameQueueRef.current.shift() || null;
+        }
+        if (frameToDraw) {
+          drawFrame(frameToDraw.img);
         }
         if (!frameQueueRef.current.length && videoState === 'playing') {
           setVideoState('buffering');
@@ -574,13 +617,17 @@ const App: React.FC = () => {
     videoRafRef.current = window.requestAnimationFrame(tick);
   }, [drawFrame, videoState]);
 
-  const enqueueFrames = useCallback((frames: string[], fps?: number) => {
+  const enqueueFrames = useCallback((frames: string[], startAt: number, duration: number, fps?: number) => {
     if (!frames || frames.length === 0) return;
     if (fps && fps > 0) {
       setVideoFps(fps);
       videoFpsRef.current = fps;
     }
-    frameQueueRef.current.push(...frames);
+    const frameCount = frames.length;
+    const frameDuration = frameCount > 0 ? duration / frameCount : 0;
+    frames.forEach((img, i) => {
+      frameQueueRef.current.push({ img, t: startAt + i * frameDuration });
+    });
     setVideoQueue(frameQueueRef.current.length);
     if (videoState === 'idle') setVideoState('buffering');
     startVideoLoop();
@@ -594,11 +641,13 @@ const App: React.FC = () => {
     source.buffer = buffer;
     source.connect(gain);
     gain.connect(ctx.destination);
+    activeSourcesRef.current.add(source);
+    source.onended = () => activeSourcesRef.current.delete(source);
 
     const fadeMs = 12;
     const fadeTime = Math.min(fadeMs / 1000, Math.max(0.003, buffer.duration / 4));
     const overlap = fadeTime;
-    const startAt = Math.max(ctx.currentTime + audioStartDelayRef.current, nextStartTimeRef.current);
+    const startAt = Math.max(ctx.currentTime + 0.05, nextStartTimeRef.current);
     const endAt = startAt + buffer.duration;
 
     const fadeSamples = Math.max(32, Math.floor(ctx.sampleRate * fadeTime));
@@ -617,19 +666,26 @@ const App: React.FC = () => {
 
     source.start(startAt);
     nextStartTimeRef.current = endAt - overlap;
+    audioEndTimeRef.current = Math.max(audioEndTimeRef.current, endAt);
     return { startAt, endAt };
   };
 
   const startInference = useCallback(async () => {
     if (!profile.name || !inferenceText) return;
     setUiNotice(null);
-    await ensureAudioContext();
+    await unlockAudio();
+    if (audioContextRef.current?.state !== 'running') {
+      setUiNotice('Safari blocked audio. Click again to enable sound.');
+      return;
+    }
+    stopAllAudio();
     resetVideo();
     setStepStatuses(prev => ({ ...prev, inference: 'running' }));
     setInferenceChunks([]);
     setLatency(null);
     setInferenceStageIndex(inferenceSteps.length > 0 ? 0 : null);
     nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
+    audioEndTimeRef.current = nextStartTimeRef.current;
     audioStartDelayRef.current = outputMode === 'avatar' ? 0.35 : 0.05;
     let sawError = false;
 
@@ -692,10 +748,6 @@ const App: React.FC = () => {
           setLatency({ ttfa: Math.round(performance.now() - startTime), total: 0 });
           setInferenceStageIndex(Math.min(2, inferenceSteps.length - 1));
         }
-        if (outputMode === 'avatar' && Array.isArray(data.frames_base64)) {
-          enqueueFrames(data.frames_base64, data.fps);
-          setInferenceStageIndex(Math.min(3, inferenceSteps.length - 1));
-        }
         const binary = atob(data.audio_base64);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i += 1) {
@@ -706,6 +758,11 @@ const App: React.FC = () => {
         if (outputMode === 'avatar' && schedule && videoStartTimeRef.current === null) {
           videoStartTimeRef.current = schedule.startAt;
           videoNextFrameTimeRef.current = schedule.startAt;
+        }
+        if (outputMode === 'avatar' && schedule && Array.isArray(data.frames_base64)) {
+          const duration = typeof data.duration_sec === 'number' ? data.duration_sec : buffer.duration;
+          enqueueFrames(data.frames_base64, schedule.startAt, duration, data.fps);
+          setInferenceStageIndex(Math.min(3, inferenceSteps.length - 1));
         }
         if (outputMode === 'voice') {
           setInferenceStageIndex(Math.min(4, inferenceSteps.length - 1));
