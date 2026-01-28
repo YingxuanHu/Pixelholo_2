@@ -25,6 +25,7 @@ from config import (
     resolve_training_dir,
 )
 from src.inference import StyleTTS2RepoEngine
+from src.text_normalize import clean_text_for_tts
 
 
 def _find_latest_checkpoint(training_dir: Path) -> Path | None:
@@ -550,7 +551,8 @@ def main() -> None:
 
     infer_start = time.perf_counter()
     engine = StyleTTS2RepoEngine(model_path=model_path, config_path=config_path)
-    chunks = _split_text(args.text, max_chunk_chars, max_chunk_words)
+    clean_text = clean_text_for_tts(args.text)
+    chunks = _split_text(clean_text, max_chunk_chars, max_chunk_words)
     if not chunks:
         raise ValueError("No text to synthesize.")
 

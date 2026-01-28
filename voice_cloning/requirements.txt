@@ -17,6 +17,8 @@ soundfile
 transformers
 resemblyzer
 opencv-python
+num2words
+nemo_text_processing
 click
 tensorboard
 munch

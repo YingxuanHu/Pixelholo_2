@@ -30,6 +30,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.lipsync_bridge import LipSyncBridge
+from src.text_normalize import clean_text_for_tts
+
+SILENCE_CULLING_ENABLED = True
+SILENCE_RMS_THRESHOLD = 0.003
 
 warnings.filterwarnings(
     "ignore",
@@ -1325,7 +1329,8 @@ def stream(req: GenerateRequest):
         if req.crossfade_ms is not None
         else profile.get("crossfade_ms", 8.0)
     )
-    chunks = _split_text_warmup(req.text, max_chars, max_words)
+    clean_text = clean_text_for_tts(req.text)
+    chunks = _split_text_warmup(clean_text, max_chars, max_words)
     if not chunks:
         raise HTTPException(status_code=400, detail="Text is empty.")
     seed = req.seed if req.seed is not None else profile.get("seed")
@@ -1455,7 +1460,8 @@ def stream_avatar(req: GenerateRequest):
         else profile_defaults.get("smart_trim_pad_ms", 50.0)
     )
 
-    chunks = _split_text_staircase(req.text, max_chars, max_words, [4, 10, 25])
+    clean_text = clean_text_for_tts(req.text)
+    chunks = _split_text_staircase(clean_text, max_chars, max_words, [4, 10, 25])
     if not chunks:
         raise HTTPException(status_code=400, detail="Text is empty.")
 
@@ -1530,6 +1536,8 @@ def stream_avatar(req: GenerateRequest):
 
         threading.Thread(target=_audio_worker, daemon=True).start()
 
+        last_frame: np.ndarray | None = None
+
         while True:
             kind, idx, audio, audio_16k = result_queue.get()
             if kind == "error":
@@ -1541,7 +1549,15 @@ def stream_avatar(req: GenerateRequest):
             if kind == "done":
                 break
 
-            frames = lipsync.sync_chunk(audio_16k, fps=fps)
+            rms = float(np.sqrt(np.mean(np.square(audio)))) if audio is not None and audio.size else 0.0
+            frames_needed = max(1, int(round((len(audio_16k) / 16000.0) * fps))) if audio_16k is not None else 0
+
+            if SILENCE_CULLING_ENABLED and rms < SILENCE_RMS_THRESHOLD and last_frame is not None:
+                frames = [last_frame.copy() for _ in range(frames_needed)]
+            else:
+                frames = lipsync.sync_chunk(audio_16k, fps=fps)
+                if frames:
+                    last_frame = frames[-1].copy()
             frame_payloads = []
             jpeg_quality = 70
             for frame in frames:
@@ -1626,7 +1642,8 @@ def generate(req: GenerateRequest):
             if req.crossfade_ms is not None
             else profile.get("crossfade_ms", 8.0)
         )
-        chunks = _split_text(req.text, max_chars, max_words)
+        clean_text = clean_text_for_tts(req.text)
+        chunks = _split_text(clean_text, max_chars, max_words)
         if not chunks:
             raise HTTPException(status_code=400, detail="Text is empty.")
         parts: list[np.ndarray] = []
