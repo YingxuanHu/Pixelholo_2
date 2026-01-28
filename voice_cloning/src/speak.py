@@ -26,6 +26,7 @@ from config import (
 )
 from src.inference import StyleTTS2RepoEngine
 from src.text_normalize import clean_text_for_tts
+from src.style_select import pick_style_ref
 
 
 def _find_latest_checkpoint(training_dir: Path) -> Path | None:
@@ -473,17 +474,46 @@ def main() -> None:
     if f0_scale is None:
         f0_scale = _load_f0_scale(model_path) or 1.0
 
-    alpha = args.alpha if args.alpha is not None else defaults.get("alpha", 0.1)
-    beta = args.beta if args.beta is not None else defaults.get("beta", 0.1)
-    diffusion_steps = (
-        args.diffusion_steps
-        if args.diffusion_steps is not None
-        else defaults.get("diffusion_steps", 30)
+    # Pull inference defaults from config_ft.yml if profile.json doesn't provide them.
+    config_defaults = {}
+    try:
+        config_defaults = yaml.safe_load(Path(config_path).read_text()) or {}
+    except Exception:
+        config_defaults = {}
+    if isinstance(config_defaults, dict):
+        for key in ("inference_params", "inference", "synthesis_params", "generate_params"):
+            block = config_defaults.get(key)
+            if isinstance(block, dict):
+                config_defaults = block
+                break
+    else:
+        config_defaults = {}
+
+    def _pick(name, req_value, profile_value, cfg_value):
+        if req_value is not None:
+            return req_value
+        if profile_value is not None:
+            return profile_value
+        if cfg_value is not None:
+            return cfg_value
+        raise ValueError(
+            f"Missing inference param '{name}'. "
+            "Set it in profile.json, CLI args, or config_ft.yml (inference_params)."
+        )
+
+    alpha = _pick("alpha", args.alpha, defaults.get("alpha"), config_defaults.get("alpha"))
+    beta = _pick("beta", args.beta, defaults.get("beta"), config_defaults.get("beta"))
+    diffusion_steps = _pick(
+        "diffusion_steps",
+        args.diffusion_steps,
+        defaults.get("diffusion_steps"),
+        config_defaults.get("diffusion_steps"),
     )
-    embedding_scale = (
-        args.embedding_scale
-        if args.embedding_scale is not None
-        else defaults.get("embedding_scale", 1.5)
+    embedding_scale = _pick(
+        "embedding_scale",
+        args.embedding_scale,
+        defaults.get("embedding_scale"),
+        config_defaults.get("embedding_scale"),
     )
     phonemizer_lang = (
         args.phonemizer_lang
@@ -562,9 +592,12 @@ def main() -> None:
     for idx, chunk in enumerate(chunks):
         if pad_text:
             chunk = f"{pad_text_token} {chunk} {pad_text_token}"
+        ref_for_chunk = ref_wav
+        if profile_dir is not None:
+            ref_for_chunk = pick_style_ref(chunk, profile_dir, ref_wav)
         audio = engine.generate(
             chunk,
-            ref_wav_path=ref_wav,
+            ref_wav_path=ref_for_chunk,
             alpha=alpha,
             beta=beta,
             diffusion_steps=diffusion_steps,

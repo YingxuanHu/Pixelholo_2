@@ -230,18 +230,38 @@ const App: React.FC = () => {
     if (warmedProfilesRef.current.has(profileName)) return;
     warmedProfilesRef.current.add(profileName);
     try {
-      const res = await fetch(`${apiBase}/generate`, {
+      const controller = new AbortController();
+      const endpoint = profileType === 'avatar' ? '/stream_avatar' : '/generate';
+      const payload =
+        profileType === 'avatar'
+          ? {
+              avatar_profile: profileName,
+              profile_type: profileType,
+              text: 'warmup',
+            }
+          : {
+              speaker: profileName,
+              profile_type: profileType,
+              text: 'warmup',
+              return_base64: true,
+            };
+      const res = await fetch(`${apiBase}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          speaker: profileName,
-          profile_type: profileType,
-          text: 'warmup',
-          return_base64: true,
-        }),
+        body: JSON.stringify(payload),
+        signal: controller.signal,
       });
       if (!res.ok) throw new Error(await res.text());
-      await res.json();
+      if (profileType === 'avatar') {
+        // Read a single line to force model + lipsync load, then abort.
+        if (res.body) {
+          const reader = res.body.getReader();
+          await reader.read();
+          controller.abort();
+        }
+      } else {
+        await res.json();
+      }
     } catch (err) {
       warmedProfilesRef.current.delete(profileName);
     }

@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 from src.lipsync_bridge import LipSyncBridge
 from src.text_normalize import clean_text_for_tts
+from src.style_select import pick_style_ref
 
 SILENCE_CULLING_ENABLED = True
 SILENCE_RMS_THRESHOLD = 0.003
@@ -619,6 +620,20 @@ def _load_profile_defaults(model_path: Path) -> dict:
     return {}
 
 
+def _load_inference_defaults(config_path: Path) -> dict:
+    try:
+        data = yaml.safe_load(config_path.read_text())
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    for key in ("inference_params", "inference", "synthesis_params", "generate_params"):
+        block = data.get(key)
+        if isinstance(block, dict):
+            return block
+    return {}
+
+
 def _load_profile_defaults_for_speaker(
     model_path: Path,
     speaker: str | None,
@@ -701,38 +716,65 @@ def _load_lexicon(path: Path | None) -> dict[str, str] | None:
 
 def _resolve_inference_params(
     model_path: Path,
+    config_path: Path,
     req: "GenerateRequest",
     speaker: str | None,
     profile_type: str | None,
 ) -> dict[str, float]:
-    defaults = {
-        "alpha": DEFAULT_ALPHA,
-        "beta": DEFAULT_BETA,
-        "diffusion_steps": DEFAULT_DIFFUSION_STEPS,
-        "embedding_scale": DEFAULT_EMBEDDING_SCALE,
-        "f0_scale": DEFAULT_F0_SCALE,
-    }
+    defaults = _load_inference_defaults(config_path)
     profile = _load_profile_defaults_for_speaker(model_path, speaker, profile_type)
-    for key in defaults:
-        if key in profile:
-            defaults[key] = profile[key]
+
+    def _pick_value(name: str, req_value, profile_value, config_value):
+        if req_value is not None:
+            return req_value
+        if profile_value is not None:
+            return profile_value
+        if config_value is not None:
+            return config_value
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Missing inference param '{name}'. "
+                "Set it in profile.json, request body, or config_ft.yml (inference_params)."
+            ),
+        )
 
     params = {
-        "alpha": defaults["alpha"] if req.alpha is None else req.alpha,
-        "beta": defaults["beta"] if req.beta is None else req.beta,
-        "diffusion_steps": (
-            defaults["diffusion_steps"] if req.diffusion_steps is None else req.diffusion_steps
+        "alpha": _pick_value("alpha", req.alpha, profile.get("alpha"), defaults.get("alpha")),
+        "beta": _pick_value("beta", req.beta, profile.get("beta"), defaults.get("beta")),
+        "diffusion_steps": _pick_value(
+            "diffusion_steps",
+            req.diffusion_steps,
+            profile.get("diffusion_steps"),
+            defaults.get("diffusion_steps"),
         ),
-        "embedding_scale": (
-            defaults["embedding_scale"] if req.embedding_scale is None else req.embedding_scale
+        "embedding_scale": _pick_value(
+            "embedding_scale",
+            req.embedding_scale,
+            profile.get("embedding_scale"),
+            defaults.get("embedding_scale"),
         ),
-        "f0_scale": defaults["f0_scale"] if req.f0_scale is None else req.f0_scale,
+        "f0_scale": _pick_value(
+            "f0_scale",
+            req.f0_scale,
+            profile.get("f0_scale"),
+            defaults.get("f0_scale"),
+        ),
     }
 
-    if req.f0_scale is None and "f0_scale" not in profile:
+    if req.f0_scale is None and "f0_scale" not in profile and params["f0_scale"] is None:
         params["f0_scale"] = _resolve_f0_scale(model_path, None)
 
     return params
+
+
+def _pick_ref_for_chunk(chunk: str, profile_dir: Path | None, fallback: Path) -> Path:
+    if profile_dir is None:
+        return fallback
+    try:
+        return Path(pick_style_ref(chunk, profile_dir, fallback))
+    except Exception:
+        return fallback
 
 
 class GenerateRequest(BaseModel):
@@ -1282,7 +1324,8 @@ def stream(req: GenerateRequest):
     model_path = _resolve_model_path(req.model_path, req.speaker, profile_type)
     config_path = _resolve_config_path(model_path, req.config_path, req.speaker, profile_type)
     ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type, model_path)
-    params = _resolve_inference_params(model_path, req, req.speaker, profile_type)
+    profile_dir = resolve_dataset_root(req.speaker or "", profile_type) if req.speaker else None
+    params = _resolve_inference_params(model_path, config_path, req, req.speaker, profile_type)
     phonemizer_lang = _resolve_phonemizer_lang(model_path, req, req.speaker, profile_type)
     lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker, profile_type)
     lexicon = _load_lexicon(lexicon_path)
@@ -1340,11 +1383,12 @@ def stream(req: GenerateRequest):
 
     def _generator() -> Iterator[str]:
         for idx, chunk in enumerate(chunks):
+            ref_for_chunk = _pick_ref_for_chunk(chunk, profile_dir, ref_wav_path)
             if pad_text:
                 chunk = f"{pad_text_token} {chunk} {pad_text_token}"
             audio = engine.generate(
                 chunk,
-                ref_wav_path=ref_wav_path,
+                ref_wav_path=ref_for_chunk,
                 alpha=params["alpha"],
                 beta=params["beta"],
                 diffusion_steps=params["diffusion_steps"],
@@ -1410,7 +1454,8 @@ def stream_avatar(req: GenerateRequest):
     model_path = _resolve_model_path(req.model_path, profile, profile_type)
     config_path = _resolve_config_path(model_path, req.config_path, profile, profile_type)
     ref_wav_path = _resolve_ref_wav(req.ref_wav_path, profile, profile_type, model_path)
-    params = _resolve_inference_params(model_path, req, profile, profile_type)
+    profile_dir = resolve_dataset_root(profile, profile_type)
+    params = _resolve_inference_params(model_path, config_path, req, profile, profile_type)
     phonemizer_lang = _resolve_phonemizer_lang(model_path, req, profile, profile_type)
     lexicon_path = _resolve_lexicon_path(model_path, req, profile, profile_type)
     lexicon = _load_lexicon(lexicon_path)
@@ -1478,11 +1523,12 @@ def stream_avatar(req: GenerateRequest):
         def _audio_worker() -> None:
             try:
                 for idx, chunk in enumerate(chunks):
+                    ref_for_chunk = _pick_ref_for_chunk(chunk, profile_dir, ref_wav_path)
                     if pad_text:
                         chunk = f"{pad_text_token} {chunk} {pad_text_token}"
                     audio = engine.generate(
                         chunk,
-                        ref_wav_path=ref_wav_path,
+                        ref_wav_path=ref_for_chunk,
                         alpha=params["alpha"],
                         beta=params["beta"],
                         diffusion_steps=params["diffusion_steps"],
@@ -1594,7 +1640,8 @@ def generate(req: GenerateRequest):
 
     config_path = _resolve_config_path(model_path, req.config_path, req.speaker, profile_type)
     ref_wav_path = _resolve_ref_wav(req.ref_wav_path, req.speaker, profile_type, model_path)
-    params = _resolve_inference_params(model_path, req, req.speaker, profile_type)
+    profile_dir = resolve_dataset_root(req.speaker or "", profile_type) if req.speaker else None
+    params = _resolve_inference_params(model_path, config_path, req, req.speaker, profile_type)
     phonemizer_lang = _resolve_phonemizer_lang(model_path, req, req.speaker, profile_type)
     lexicon_path = _resolve_lexicon_path(model_path, req, req.speaker, profile_type)
     lexicon = _load_lexicon(lexicon_path)
@@ -1652,11 +1699,12 @@ def generate(req: GenerateRequest):
         if seed is None and len(chunks) > 1:
             seed = 1234
         for idx, chunk in enumerate(chunks):
+            ref_for_chunk = _pick_ref_for_chunk(chunk, profile_dir, ref_wav_path)
             if pad_text:
                 chunk = f"{pad_text_token} {chunk} {pad_text_token}"
             audio = engine.generate(
                 chunk,
-                ref_wav_path=ref_wav_path,
+                ref_wav_path=ref_for_chunk,
                 alpha=params["alpha"],
                 beta=params["beta"],
                 diffusion_steps=params["diffusion_steps"],
