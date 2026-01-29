@@ -26,7 +26,6 @@ from config import (
 )
 from src.inference import StyleTTS2RepoEngine
 from src.text_normalize import clean_text_for_tts
-from src.style_select import pick_style_ref
 
 
 def _find_latest_checkpoint(training_dir: Path) -> Path | None:
@@ -589,15 +588,13 @@ def main() -> None:
     audio_parts: list[np.ndarray] = []
     pause = np.zeros(int(engine.sample_rate * (pause_ms / 1000.0)), dtype=np.float32)
     chunk_seed = None if args.no_seed else args.seed
+    ref_for_run = ref_wav
     for idx, chunk in enumerate(chunks):
         if pad_text:
             chunk = f"{pad_text_token} {chunk} {pad_text_token}"
-        ref_for_chunk = ref_wav
-        if profile_dir is not None:
-            ref_for_chunk = pick_style_ref(chunk, profile_dir, ref_wav)
         audio = engine.generate(
             chunk,
-            ref_wav_path=ref_for_chunk,
+            ref_wav_path=ref_for_run,
             alpha=alpha,
             beta=beta,
             diffusion_steps=diffusion_steps,
