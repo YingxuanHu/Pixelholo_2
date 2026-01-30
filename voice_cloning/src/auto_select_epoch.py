@@ -503,7 +503,7 @@ def main() -> None:
     parser.add_argument(
         "--early_prefer_min",
         type=int,
-        default=3,
+        default=4,
         help="Lower bound for early-epoch preference window (0 to disable).",
     )
     parser.add_argument(

@@ -4,6 +4,7 @@ from typing import Generator, List, Dict
 from dotenv import load_dotenv
 from groq import Groq
 
+from src.utils.smart_buffer import SmartStreamBuffer
 
 class LLMService:
     def __init__(self, system_prompt: str = "You are a helpful, concise AI assistant."):
@@ -20,7 +21,7 @@ class LLMService:
         self,
         user_input: str,
         min_words: int = 8,
-        min_chars: int = 20,
+        min_chars: int = 40,
     ) -> Generator[str, None, None]:
         """
         Sends text to Groq (Llama 3) and yields COMPLETE SENTENCES as they are generated.
@@ -38,31 +39,24 @@ class LLMService:
             yield f"Error calling Groq: {str(e)}"
             return
 
-        buffer = ""
         full_response_text = ""
+        min_chunk_size = max(min_chars, min_words * 2)
+        smart_buffer = SmartStreamBuffer(min_chunk_size=min_chunk_size, max_chunk_size=150)
 
         print("🧠 Llama 3 Thinking...", end="", flush=True)
 
         for chunk in stream:
             if chunk.choices[0].delta.content:
                 token = chunk.choices[0].delta.content
-                buffer += token
                 full_response_text += token
 
-                if any(punct in token for punct in [".", "?", "!", "\n"]):
-                    if buffer.strip().endswith("Mr.") or buffer.strip().endswith("Dr."):
-                        continue
+                chunk = smart_buffer.add_token(token)
+                if chunk:
+                    yield chunk
 
-                    sent = buffer.strip()
-                    if sent:
-                        word_count = len(sent.split())
-                        if word_count < min_words or len(sent) < min_chars:
-                            continue
-                        yield sent
-                        buffer = ""
-
-        if buffer.strip():
-            yield buffer.strip()
+        tail = smart_buffer.flush()
+        if tail:
+            yield tail
 
         self.history.append({"role": "assistant", "content": full_response_text})
         print(" Done.")

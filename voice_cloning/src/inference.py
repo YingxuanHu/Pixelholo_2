@@ -37,7 +37,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from src.lipsync_bridge import LipSyncBridge
-from src.text_normalize import clean_text_for_tts
+from src.text_normalize import clean_text_for_tts, warmup_text_normalizer
+from src.utils.smart_buffer import SmartStreamBuffer
+from src.utils.prosody_chunker import prosody_split
 from src.llm.llm_service import LLMService
 
 SILENCE_CULLING_ENABLED = True
@@ -98,7 +100,7 @@ MEAN = -4
 STD = 4
 DEFAULT_ALPHA = 0.1
 DEFAULT_BETA = 0.1
-DEFAULT_DIFFUSION_STEPS = 25
+DEFAULT_DIFFUSION_STEPS = 10
 DEFAULT_EMBEDDING_SCALE = 1.5
 DEFAULT_F0_SCALE = 1.0
 DEFAULT_LANG = "en-ca"
@@ -227,6 +229,23 @@ def _split_text_staircase(
         chunks.append(candidate)
         cursor = end
         step += 1
+    return chunks
+
+
+def _split_text_prosody(text: str, max_chars: int) -> list[str]:
+    return prosody_split(text, max_chars=max_chars)
+
+
+def _smart_chunks(text: str, min_chars: int = 40, max_chars: int = 150) -> list[str]:
+    buffer = SmartStreamBuffer(min_chunk_size=min_chars, max_chunk_size=max_chars)
+    chunks: list[str] = []
+    for word in text.split():
+        chunk = buffer.add_token(word + " ")
+        if chunk:
+            chunks.append(chunk)
+    tail = buffer.flush()
+    if tail:
+        chunks.append(tail)
     return chunks
 
 
@@ -901,6 +920,12 @@ def _stream_avatar_from_text_iter(req: GenerateRequest, text_iter: Iterator[str]
     if seed is None:
         seed = 1234
     pause = np.zeros(int(engine.sample_rate * (pause_ms / 1000.0)), dtype=np.float32)
+    comma_pause_ms = max(50.0, float(pause_ms) * 0.35)
+    comma_pause = np.zeros(int(engine.sample_rate * (comma_pause_ms / 1000.0)), dtype=np.float32)
+    comma_pause_ms = max(50.0, float(pause_ms) * 0.35)
+    comma_pause = np.zeros(int(engine.sample_rate * (comma_pause_ms / 1000.0)), dtype=np.float32)
+    comma_pause_ms = max(50.0, float(pause_ms) * 0.35)
+    comma_pause = np.zeros(int(engine.sample_rate * (comma_pause_ms / 1000.0)), dtype=np.float32)
 
     def _generator() -> Iterator[str]:
         result_queue: queue.Queue[tuple[str, int, np.ndarray | None, np.ndarray | None]] = queue.Queue(
@@ -926,7 +951,7 @@ def _stream_avatar_from_text_iter(req: GenerateRequest, text_iter: Iterator[str]
                         break
                     clean_sentence = clean_text_for_tts(sentence)
                     sentence_ref = ref_wav_path
-                    for chunk in _split_text_staircase(clean_sentence, max_chars, max_words, [4, 10, 25]):
+                    for chunk in _split_text_prosody(clean_sentence, max_chars):
                         if pad_text:
                             chunk = f"{pad_text_token} {chunk} {pad_text_token}"
                         audio = _AI_EXECUTOR.submit(
@@ -952,9 +977,12 @@ def _stream_avatar_from_text_iter(req: GenerateRequest, text_iter: Iterator[str]
                             )
                         audio = _remove_dc(audio.astype(np.float32, copy=False))
                         audio = _fade_edges(audio, engine.sample_rate, fade_ms=5.0)
-                        is_sentence_end = chunk.rstrip().endswith((".", "!", "?", ";", ":"))
+                        is_sentence_end = chunk.rstrip().endswith((".", "!", "?"))
+                        is_clause_end = chunk.rstrip().endswith((",", ";", ":"))
                         if is_sentence_end and pause.size:
                             audio = np.concatenate([audio, pause])
+                        elif is_clause_end and comma_pause.size:
+                            audio = np.concatenate([audio, comma_pause])
 
                         pitch_shift = (
                             req.pitch_shift
@@ -1015,7 +1043,7 @@ def _stream_avatar_from_text_iter(req: GenerateRequest, text_iter: Iterator[str]
                     if frames:
                         last_frame = frames[-1].copy()
                 frame_payloads = []
-                jpeg_quality = 70
+                jpeg_quality = 80
                 for frame in frames:
                     ok, buf = cv2.imencode(
                         ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
@@ -1106,7 +1134,7 @@ def _stream_voice_from_text_iter(req: GenerateRequest, text_iter: Iterator[str])
             for sentence in text_iter:
                 clean_sentence = clean_text_for_tts(sentence)
                 sentence_ref = ref_wav_path
-                for chunk in _split_text_warmup(clean_sentence, max_chars, max_words):
+                for chunk in _split_text_prosody(clean_sentence, max_chars):
                     if pad_text:
                         chunk = f"{pad_text_token} {chunk} {pad_text_token}"
                     audio = engine.generate(
@@ -1130,8 +1158,11 @@ def _stream_voice_from_text_iter(req: GenerateRequest, text_iter: Iterator[str])
                         )
                     audio = _remove_dc(audio.astype(np.float32, copy=False))
                     audio = _fade_edges(audio, engine.sample_rate, fade_ms=5.0)
-                    if chunk.rstrip().endswith((".", "!", "?", ";", ":")) and pause.size:
+                    suffix = chunk.rstrip()
+                    if suffix.endswith((".", "!", "?")) and pause.size:
                         audio = np.concatenate([audio, pause])
+                    elif suffix.endswith((",", ";", ":")) and comma_pause.size:
+                        audio = np.concatenate([audio, comma_pause])
                     pitch_shift = (
                         req.pitch_shift
                         if req.pitch_shift is not None
@@ -1581,14 +1612,56 @@ def _warmup_engine(model_path: Path, config_path: Path) -> None:
         print(f"Warmup failed: {exc}")
 
 
+_warmed_profiles: set[tuple[str, str]] = set()
+
+
+def _warmup_lipsync(profile: str, profile_type: str) -> None:
+    try:
+        lipsync = _get_lipsync_engine()
+        lipsync.load_profile(profile, profile_type)
+        dummy = np.zeros(int(0.4 * 16000), dtype=np.float32)
+        lipsync.sync_chunk(dummy, fps=lipsync.fps)
+        print("Lipsync warmup completed.")
+    except Exception as exc:
+        print(f"Lipsync warmup failed: {exc}")
+
+
+def _warmup_profile(profile: str, profile_type: str) -> None:
+    key = (profile, profile_type)
+    if key in _warmed_profiles:
+        return
+    model_path = _resolve_model_path(None, profile, profile_type)
+    config_path = _resolve_config_path(model_path, None, profile, profile_type)
+    if model_path and config_path:
+        _warmup_engine(model_path, config_path)
+    if profile_type == PROFILE_TYPE_AVATAR:
+        _warmup_lipsync(profile, profile_type)
+    _warmed_profiles.add(key)
+
+
 @app.on_event("startup")
 def _startup() -> None:
+    try:
+        warmup_text_normalizer()
+        print("Text normalizer warmup completed.")
+    except Exception as exc:
+        print(f"Text normalizer warmup failed: {exc}")
     default_model = os.getenv("STYLE_TTS2_MODEL")
     if default_model:
         model_path = Path(default_model).expanduser()
         config_path = _resolve_config_path(model_path, os.getenv("STYLE_TTS2_CONFIG"))
         _get_engine(model_path, config_path)
         _warmup_engine(model_path, config_path)
+
+
+@app.post("/warmup")
+def warmup(req: TrainRequest):
+    profile = req.profile.strip()
+    if not profile:
+        raise HTTPException(status_code=400, detail="profile is required")
+    profile_type = req.profile_type or PROFILE_TYPE_VOICE
+    _warmup_profile(profile, profile_type)
+    return {"status": "ok", "profile": profile, "profile_type": profile_type}
 
 
 @app.get("/profiles")
@@ -1747,10 +1820,32 @@ def train(req: TrainRequest):
         command.append("--auto_build_lexicon")
     if not req.early_stop:
         command.append("--no_early_stop")
-    return StreamingResponse(
-        _stream_subprocess(command, cwd=PROJECT_ROOT),
-        media_type="text/plain",
-    )
+    def _train_stream() -> Iterator[str]:
+        process = subprocess.Popen(
+            command,
+            cwd=PROJECT_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            yield line.rstrip()
+        exit_code = process.wait()
+        if exit_code != 0:
+            yield f"[process exited {exit_code}]"
+            yield "ERROR: Subprocess failed. See logs above for details."
+            return
+        yield f"[process exited {exit_code}]"
+        yield "[warmup] starting..."
+        try:
+            _warmup_profile(profile, profile_type)
+            yield "[warmup] done"
+        except Exception as exc:
+            yield f"[warmup] failed: {exc}"
+
+    return StreamingResponse(_train_stream(), media_type="text/plain")
 
 
 @app.post("/stream")
@@ -1809,7 +1904,7 @@ def stream(req: GenerateRequest):
         else profile.get("crossfade_ms", 8.0)
     )
     clean_text = clean_text_for_tts(req.text)
-    chunks = _split_text_warmup(clean_text, max_chars, max_words)
+    chunks = _split_text_prosody(clean_text, max_chars)
     if not chunks:
         raise HTTPException(status_code=400, detail="Text is empty.")
     seed = req.seed if req.seed is not None else profile.get("seed")
@@ -1843,8 +1938,12 @@ def stream(req: GenerateRequest):
                 )
             audio = _remove_dc(audio.astype(np.float32, copy=False))
             audio = _fade_edges(audio, engine.sample_rate, fade_ms=5.0)
-            if idx < len(chunks) - 1 and pause.size:
-                audio = np.concatenate([audio, pause])
+            if idx < len(chunks) - 1:
+                suffix = chunk.rstrip()
+                if suffix.endswith((".", "!", "?")) and pause.size:
+                    audio = np.concatenate([audio, pause])
+                elif suffix.endswith((",", ";", ":")) and comma_pause.size:
+                    audio = np.concatenate([audio, comma_pause])
             pitch_shift = (
                 req.pitch_shift
                 if req.pitch_shift is not None
@@ -1944,11 +2043,13 @@ def generate(req: GenerateRequest):
             else profile.get("crossfade_ms", 8.0)
         )
         clean_text = clean_text_for_tts(req.text)
-        chunks = _split_text(clean_text, max_chars, max_words)
+        chunks = _split_text_prosody(clean_text, max_chars)
         if not chunks:
             raise HTTPException(status_code=400, detail="Text is empty.")
         parts: list[np.ndarray] = []
         pause = np.zeros(int(engine.sample_rate * (pause_ms / 1000.0)), dtype=np.float32)
+        comma_pause_ms = max(50.0, float(pause_ms) * 0.35)
+        comma_pause = np.zeros(int(engine.sample_rate * (comma_pause_ms / 1000.0)), dtype=np.float32)
         seed = req.seed if req.seed is not None else profile.get("seed")
         if seed is None and len(chunks) > 1:
             seed = 1234
@@ -1979,7 +2080,11 @@ def generate(req: GenerateRequest):
             audio = _fade_edges(audio, engine.sample_rate, fade_ms=5.0)
             parts.append(audio)
             if idx < len(chunks) - 1:
-                parts.append(pause)
+                suffix = chunk.rstrip()
+                if suffix.endswith((".", "!", "?")) and pause.size:
+                    parts.append(pause)
+                elif suffix.endswith((",", ";", ":")) and comma_pause.size:
+                    parts.append(comma_pause)
         audio = _apply_crossfade(parts, engine.sample_rate, crossfade_ms)
         pitch_shift = (
             req.pitch_shift
@@ -2042,6 +2147,9 @@ def speak(req: GenerateRequest):
         raise HTTPException(status_code=400, detail="Text is empty.")
     profile_type = req.profile_type or PROFILE_TYPE_VOICE
     if profile_type == PROFILE_TYPE_AVATAR or req.avatar_profile:
-        text_iter = iter([req.text])
+        text_iter = iter(_split_text_prosody(req.text, max_chars=DEFAULT_MAX_CHUNK_CHARS))
         return _stream_avatar_from_text_iter(req, text_iter)
-    return _stream_voice_from_text_iter(req, iter([req.text]))
+    return _stream_voice_from_text_iter(
+        req,
+        iter(_split_text_prosody(req.text, max_chars=DEFAULT_MAX_CHUNK_CHARS)),
+    )

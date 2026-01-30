@@ -26,8 +26,6 @@ type TrainParams = {
   maxLen: number;
 };
 
-type TrainMode = 'fast' | 'quality';
-
 const createLog = (message: string, level: LogEntry['level'] = 'info'): LogEntry => ({
   id: Math.random().toString(36).slice(2, 10),
   timestamp: new Date().toLocaleTimeString([], {
@@ -49,14 +47,11 @@ const defaultFlags: TrainFlags = {
 
 const defaultTrainParams: TrainParams = {
   batchSize: 2,
-  epochs: 25,
+  epochs: 15,
   maxLen: 400,
 };
 
-const trainPresets: Record<TrainMode, TrainParams> = {
-  fast: { batchSize: 2, epochs: 12, maxLen: 300 },
-  quality: { batchSize: 2, epochs: 25, maxLen: 400 },
-};
+const trainPreset: TrainParams = { batchSize: 2, epochs: 15, maxLen: 400 };
 
 const App: React.FC = () => {
   const [activeStep, setActiveStep] = useState(1);
@@ -85,7 +80,6 @@ const App: React.FC = () => {
   const [inferenceStageIndex, setInferenceStageIndex] = useState<number | null>(null);
   const [trainFlags, setTrainFlags] = useState<TrainFlags>(defaultFlags);
   const [trainParams, setTrainParams] = useState<TrainParams>(defaultTrainParams);
-  const [trainMode, setTrainMode] = useState<TrainMode>('fast');
   const [showAdvancedTrain, setShowAdvancedTrain] = useState(false);
   const [avatarStartSec, setAvatarStartSec] = useState(5);
   const [avatarBlurKernel, setAvatarBlurKernel] = useState(31);
@@ -118,8 +112,8 @@ const App: React.FC = () => {
   const frameQueueRef = useRef<{ img: string; t: number }[]>([]);
 
   useEffect(() => {
-    setTrainParams(trainPresets[trainMode]);
-  }, [trainMode]);
+    setTrainParams(trainPreset);
+  }, []);
 
   useEffect(() => {
     if (profileType === 'avatar') {
@@ -242,38 +236,16 @@ const App: React.FC = () => {
     if (warmedProfilesRef.current.has(profileName)) return;
     warmedProfilesRef.current.add(profileName);
     try {
-      const controller = new AbortController();
-      const endpoint = profileType === 'avatar' ? '/stream_avatar' : '/generate';
-      const payload =
-        profileType === 'avatar'
-          ? {
-              avatar_profile: profileName,
-              profile_type: profileType,
-              text: 'warmup',
-            }
-          : {
-              speaker: profileName,
-              profile_type: profileType,
-              text: 'warmup',
-              return_base64: true,
-            };
-      const res = await fetch(`${apiBase}${endpoint}`, {
+      const res = await fetch(`${apiBase}/warmup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
+        body: JSON.stringify({
+          profile: profileName,
+          profile_type: profileType,
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
-      if (profileType === 'avatar') {
-        // Read a single line to force model + lipsync load, then abort.
-        if (res.body) {
-          const reader = res.body.getReader();
-          await reader.read();
-          controller.abort();
-        }
-      } else {
-        await res.json();
-      }
+      await res.json();
     } catch (err) {
       warmedProfilesRef.current.delete(profileName);
     }
@@ -734,6 +706,7 @@ const App: React.FC = () => {
       setUiNotice('Safari blocked audio. Click again to enable sound.');
       return;
     }
+    await warmupProfile(profile.name);
     // End any existing stream immediately.
     streamSessionRef.current += 1;
     stopAllAudio();
@@ -1152,10 +1125,13 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="space-y-4">
+                  <p className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+                    Avatar setup uses two files: a video for the face loop and a separate audio file for voice training.
+                  </p>
                   <div className="relative group">
                     <input
                       type="file"
-                      accept="audio/*,video/*"
+                      accept={profileType === 'voice' ? 'audio/*' : 'video/*'}
                       onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
                       disabled={!profile.name}
                       className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
@@ -1187,7 +1163,7 @@ const App: React.FC = () => {
                         {profile.name
                           ? profileType === 'voice'
                             ? 'Select High-Quality Audio'
-                            : 'Select High-Quality Video (with audio)'
+                            : 'Select High-Quality Video'
                           : 'Enter Profile Name First'}
                       </p>
                       <p className={`text-xs mt-1 ${profile.lastUploadedFile ? 'text-emerald-600' : 'text-slate-400'}`}>
@@ -1379,35 +1355,9 @@ const App: React.FC = () => {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="md:col-span-1 bg-slate-50 p-6 rounded-2xl border border-slate-100 space-y-6">
                   <div className="space-y-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Training Mode</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setTrainMode('fast')}
-                        className={`px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                          trainMode === 'fast'
-                            ? 'bg-teal-600 text-white shadow-lg shadow-teal-600/20'
-                            : 'bg-white text-slate-500'
-                        }`}
-                      >
-                        Fast
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTrainMode('quality')}
-                        className={`px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                          trainMode === 'quality'
-                            ? 'bg-slate-900 text-white shadow-lg'
-                            : 'bg-white text-slate-500'
-                        }`}
-                      >
-                        High Quality
-                      </button>
-                    </div>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Training Profile</p>
                     <p className="text-[11px] text-slate-500">
-                      {trainMode === 'fast'
-                        ? 'Fewer epochs for quick iteration.'
-                        : 'Longer run with higher fidelity.'}
+                      Unified training profile (25 epochs, max_len 400). The fast/quality toggle is removed.
                     </p>
                   </div>
 

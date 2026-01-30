@@ -39,6 +39,10 @@ def _get_nemo_normalizer():
     return _nemo_normalizer
 
 
+def warmup_text_normalizer() -> None:
+    _get_nemo_normalizer()
+
+
 def _strip_commas(value: str) -> str:
     return value.replace(",", "")
 
