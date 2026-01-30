@@ -37,6 +37,7 @@ from config import (  # noqa: E402
     TARGET_LUFS,
     metadata_path,
     processed_wavs_dir,
+    raw_audio_dir,
     raw_videos_dir,
 )
 
@@ -226,6 +227,7 @@ def process_video(
     video_path: Path,
     speaker_name: str,
     profile_type: str = PROFILE_TYPE_VOICE,
+    audio_path: Path | None = None,
     model_size: str = DEFAULT_MODEL_SIZE,
     device: str = DEFAULT_DEVICE,
     compute_type: str = DEFAULT_COMPUTE_TYPE,
@@ -242,12 +244,15 @@ def process_video(
     legacy_split: bool = False,
     bake_avatar: bool = True,
     avatar_fps: float = 25.0,
+    avatar_start_sec: float = 5.0,
     avatar_loop_sec: float = 10.0,
-    avatar_loop_fade_sec: float = 1.0,
+    avatar_loop_fade_sec: float = 0.0,
     avatar_resize_factor: int = 1,
     avatar_pads: str = "0 10 0 0",
     avatar_batch_size: int = 16,
     avatar_nosmooth: bool = False,
+    avatar_blur_background: bool = True,
+    avatar_blur_kernel: int = 31,
     avatar_device: str | None = None,
     quiet: bool = False,
 ) -> Path:
@@ -257,10 +262,12 @@ def process_video(
 
     dataset_root = raw_videos_dir(speaker_name, profile_type).parent
     raw_dir = raw_videos_dir(speaker_name, profile_type)
+    audio_dir = raw_audio_dir(speaker_name, profile_type)
     wavs_dir = processed_wavs_dir(speaker_name, profile_type)
     meta_path = metadata_path(speaker_name, profile_type)
 
     raw_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(parents=True, exist_ok=True)
     wavs_dir.mkdir(parents=True, exist_ok=True)
 
     copied_video = raw_dir / video_path.name
@@ -275,18 +282,28 @@ def process_video(
             video_path=copied_video,
             profile_type=profile_type,
             fps=avatar_fps,
+            start_sec=avatar_start_sec,
             loop_sec=avatar_loop_sec,
             loop_fade_sec=avatar_loop_fade_sec,
             resize_factor=avatar_resize_factor,
             pads=tuple(int(p) for p in avatar_pads.split()),
             batch_size=avatar_batch_size,
             nosmooth=avatar_nosmooth,
+            blur_background=avatar_blur_background,
+            blur_kernel=avatar_blur_kernel,
             device=avatar_device or device,
         )
 
-    _log(f"Extracting audio from {copied_video.name} (denoise={denoise})...")
     extracted_wav = dataset_root / f"{speaker_name}_full.wav"
-    _run_ffmpeg_extract(copied_video, extracted_wav, denoise=denoise)
+    if audio_path is not None:
+        copied_audio = audio_dir / audio_path.name
+        if audio_path.resolve() != copied_audio.resolve():
+            shutil.copy2(audio_path, copied_audio)
+        _log(f"Extracting audio from {copied_audio.name} (denoise={denoise})...")
+        _run_ffmpeg_extract(copied_audio, extracted_wav, denoise=denoise)
+    else:
+        _log(f"Extracting audio from {copied_video.name} (denoise={denoise})...")
+        _run_ffmpeg_extract(copied_video, extracted_wav, denoise=denoise)
 
     audio = AudioSegment.from_wav(extracted_wav)
     if audio.frame_rate != DEFAULT_SAMPLE_RATE:
@@ -436,6 +453,7 @@ def process_video(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Process a video into StyleTTS2-ready chunks.")
     parser.add_argument("--video", required=True, type=Path, help="Path to input video (.mp4)")
+    parser.add_argument("--audio", type=Path, default=None, help="Optional audio file for training")
     parser.add_argument("--name", required=True, help="Speaker name")
     parser.add_argument("--model_size", default=DEFAULT_MODEL_SIZE, help="faster-whisper model size")
     parser.add_argument("--device", default=DEFAULT_DEVICE, help="Device for faster-whisper")
@@ -462,6 +480,7 @@ def main() -> None:
         video_path=args.video,
         speaker_name=args.name,
         profile_type=PROFILE_TYPE_VOICE,
+        audio_path=args.audio,
         model_size=args.model_size,
         device=args.device,
         compute_type=args.compute_type,

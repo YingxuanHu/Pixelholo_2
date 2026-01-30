@@ -1,5 +1,10 @@
 import argparse
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import (
     DEFAULT_COMPUTE_TYPE,
@@ -23,6 +28,7 @@ from src.preprocess import process_video
 def main() -> None:
     parser = argparse.ArgumentParser(description="Process a video into avatar-ready chunks.")
     parser.add_argument("--video", required=True, type=Path, help="Path to input video (.mp4)")
+    parser.add_argument("--audio", type=Path, default=None, help="Optional audio file for training")
     parser.add_argument("--name", required=True, help="Speaker name")
     parser.add_argument(
         "--profile_type",
@@ -47,12 +53,15 @@ def main() -> None:
 
     parser.add_argument("--no_bake_avatar", action="store_true", help="Skip avatar cache baking for lip-sync")
     parser.add_argument("--avatar_fps", type=float, default=25.0)
+    parser.add_argument("--avatar_start_sec", type=float, default=5.0)
     parser.add_argument("--avatar_loop_sec", type=float, default=10.0)
-    parser.add_argument("--avatar_loop_fade_sec", type=float, default=1.0)
+    parser.add_argument("--avatar_loop_fade_sec", type=float, default=0.0)
     parser.add_argument("--avatar_resize_factor", type=int, default=1)
     parser.add_argument("--avatar_pads", type=str, default="0 10 0 0")
     parser.add_argument("--avatar_batch_size", type=int, default=16)
     parser.add_argument("--avatar_nosmooth", action="store_true")
+    parser.add_argument("--avatar_no_blur_background", action="store_true")
+    parser.add_argument("--avatar_blur_kernel", type=int, default=31)
     parser.add_argument("--avatar_device", type=str, default=None)
     parser.add_argument("--quiet", action="store_true", help="Reduce preprocessing logs")
 
@@ -63,6 +72,7 @@ def main() -> None:
 
     meta_path = process_video(
         video_path=args.video,
+        audio_path=args.audio,
         speaker_name=args.name,
         profile_type=PROFILE_TYPE_AVATAR,
         model_size=args.model_size,
@@ -81,12 +91,15 @@ def main() -> None:
         legacy_split=args.legacy_split,
         bake_avatar=not args.no_bake_avatar,
         avatar_fps=args.avatar_fps,
+        avatar_start_sec=args.avatar_start_sec,
         avatar_loop_sec=args.avatar_loop_sec,
         avatar_loop_fade_sec=args.avatar_loop_fade_sec,
         avatar_resize_factor=args.avatar_resize_factor,
         avatar_pads=args.avatar_pads,
         avatar_batch_size=args.avatar_batch_size,
         avatar_nosmooth=args.avatar_nosmooth,
+        avatar_blur_background=not args.avatar_no_blur_background,
+        avatar_blur_kernel=args.avatar_blur_kernel,
         avatar_device=args.avatar_device,
         quiet=args.quiet,
     )

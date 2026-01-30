@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import ControlPanel from './components/ControlPanel';
 import Header from './components/Header';
 import StepCard from './components/StepCard';
 import LogPanel from './components/LogPanel';
@@ -25,8 +26,6 @@ type TrainParams = {
   maxLen: number;
 };
 
-type TrainMode = 'fast' | 'quality';
-
 const createLog = (message: string, level: LogEntry['level'] = 'info'): LogEntry => ({
   id: Math.random().toString(36).slice(2, 10),
   timestamp: new Date().toLocaleTimeString([], {
@@ -48,14 +47,11 @@ const defaultFlags: TrainFlags = {
 
 const defaultTrainParams: TrainParams = {
   batchSize: 2,
-  epochs: 25,
+  epochs: 15,
   maxLen: 400,
 };
 
-const trainPresets: Record<TrainMode, TrainParams> = {
-  fast: { batchSize: 2, epochs: 12, maxLen: 300 },
-  quality: { batchSize: 2, epochs: 25, maxLen: 400 },
-};
+const trainPreset: TrainParams = { batchSize: 2, epochs: 15, maxLen: 400 };
 
 const App: React.FC = () => {
   const [activeStep, setActiveStep] = useState(1);
@@ -64,6 +60,7 @@ const App: React.FC = () => {
   const [profileType, setProfileType] = useState<'voice' | 'avatar'>('voice');
   const [profile, setProfile] = useState<Profile>({ name: '', lastUploadedFile: null, fileSize: null });
   const [lastUploadedFilename, setLastUploadedFilename] = useState<string | null>(null);
+  const [lastUploadedAudioFilename, setLastUploadedAudioFilename] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [profilesStatus, setProfilesStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [uiNotice, setUiNotice] = useState<string | null>(null);
@@ -83,8 +80,9 @@ const App: React.FC = () => {
   const [inferenceStageIndex, setInferenceStageIndex] = useState<number | null>(null);
   const [trainFlags, setTrainFlags] = useState<TrainFlags>(defaultFlags);
   const [trainParams, setTrainParams] = useState<TrainParams>(defaultTrainParams);
-  const [trainMode, setTrainMode] = useState<TrainMode>('fast');
   const [showAdvancedTrain, setShowAdvancedTrain] = useState(false);
+  const [avatarStartSec, setAvatarStartSec] = useState(5);
+  const [avatarBlurKernel, setAvatarBlurKernel] = useState(31);
   const [inferenceText, setInferenceText] = useState('');
   const [inferenceChunks, setInferenceChunks] = useState<InferenceChunk[]>([]);
   const [latency, setLatency] = useState<{ ttfa: number; total: number } | null>(null);
@@ -101,6 +99,7 @@ const App: React.FC = () => {
   const activeSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const audioUnlockedRef = useRef<boolean>(false);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const streamSessionRef = useRef<number>(0);
   const isBusy = Object.values(stepStatuses).some(status => status === 'running');
   const warmedProfilesRef = useRef<Set<string>>(new Set());
   const videoCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -113,8 +112,15 @@ const App: React.FC = () => {
   const frameQueueRef = useRef<{ img: string; t: number }[]>([]);
 
   useEffect(() => {
-    setTrainParams(trainPresets[trainMode]);
-  }, [trainMode]);
+    setTrainParams(trainPreset);
+  }, []);
+
+  useEffect(() => {
+    if (profileType === 'avatar') {
+      setAvatarStartSec(5);
+      setAvatarBlurKernel(31);
+    }
+  }, [profileType]);
 
   useEffect(() => {
     const cached = localStorage.getItem('voxclone_api_base');
@@ -230,38 +236,16 @@ const App: React.FC = () => {
     if (warmedProfilesRef.current.has(profileName)) return;
     warmedProfilesRef.current.add(profileName);
     try {
-      const controller = new AbortController();
-      const endpoint = profileType === 'avatar' ? '/stream_avatar' : '/generate';
-      const payload =
-        profileType === 'avatar'
-          ? {
-              avatar_profile: profileName,
-              profile_type: profileType,
-              text: 'warmup',
-            }
-          : {
-              speaker: profileName,
-              profile_type: profileType,
-              text: 'warmup',
-              return_base64: true,
-            };
-      const res = await fetch(`${apiBase}${endpoint}`, {
+      const res = await fetch(`${apiBase}/warmup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
+        body: JSON.stringify({
+          profile: profileName,
+          profile_type: profileType,
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
-      if (profileType === 'avatar') {
-        // Read a single line to force model + lipsync load, then abort.
-        if (res.body) {
-          const reader = res.body.getReader();
-          await reader.read();
-          controller.abort();
-        }
-      } else {
-        await res.json();
-      }
+      await res.json();
     } catch (err) {
       warmedProfilesRef.current.delete(profileName);
     }
@@ -270,7 +254,7 @@ const App: React.FC = () => {
   const canProceedTo = (step: number) => {
     if (step === 1) return true;
     if (step === 2) return Boolean(profile.name);
-    if (step === 3) return stepStatuses.preprocess === 'done' || hasData;
+    if (step === 3) return stepStatuses.preprocess === 'done' || hasData || hasTrainedProfile;
     if (step === 4) return stepStatuses.train === 'done' || hasTrainedProfile;
     return false;
   };
@@ -342,11 +326,30 @@ const App: React.FC = () => {
       }));
       setLastUploadedFilename(data.filename);
       setStepStatuses(prev => ({ ...prev, upload: 'done' }));
-      setActiveStep(2);
       loadProfiles();
     } catch (err) {
       setStepStatuses(prev => ({ ...prev, upload: 'error' }));
       setPreprocessLogs([createLog(`Upload failed: ${String(err)}`, 'error')]);
+    }
+  };
+
+  const handleUploadAudio = async (file: File) => {
+    if (!profile.name) return;
+    setUiNotice(null);
+    setStepStatuses(prev => ({ ...prev, upload: 'running' }));
+    const form = new FormData();
+    form.append('profile', profile.name);
+    form.append('profile_type', profileType);
+    form.append('file', file);
+    try {
+      const res = await fetch(`${apiBase}/upload_audio`, { method: 'POST', body: form });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setLastUploadedAudioFilename(data.filename);
+      setStepStatuses(prev => ({ ...prev, upload: 'done' }));
+    } catch (err) {
+      setStepStatuses(prev => ({ ...prev, upload: 'error' }));
+      setPreprocessLogs([createLog(`Audio upload failed: ${String(err)}`, 'error')]);
     }
   };
 
@@ -362,8 +365,13 @@ const App: React.FC = () => {
     const payload = {
       profile: profile.name,
       filename: lastUploadedFilename ?? null,
+      audio_filename: lastUploadedAudioFilename ?? null,
       profile_type: profileType,
       bake_avatar: profileType === 'avatar',
+      avatar_start_sec: profileType === 'avatar' ? avatarStartSec : null,
+      avatar_loop_sec: profileType === 'avatar' ? 10 : null,
+      avatar_blur_background: profileType === 'avatar',
+      avatar_blur_kernel: profileType === 'avatar' ? avatarBlurKernel : null,
     };
     try {
       const res = await fetch(`${apiBase}/preprocess`, {
@@ -427,7 +435,6 @@ const App: React.FC = () => {
       setStepStatuses(prev => ({ ...prev, preprocess: 'done' }));
       setPreprocessProgress(1);
       setPreprocessStageIndex(preprocessSteps.length ? preprocessSteps.length - 1 : null);
-      setActiveStep(3);
       loadProfiles();
     } catch (err) {
       setStepStatuses(prev => ({ ...prev, preprocess: 'error' }));
@@ -509,7 +516,6 @@ const App: React.FC = () => {
       }
       setStepStatuses(prev => ({ ...prev, train: 'done' }));
       setTrainStageIndex(trainSteps.length ? trainSteps.length - 1 : null);
-      setActiveStep(4);
       loadProfiles();
     } catch (err) {
       setStepStatuses(prev => ({ ...prev, train: 'error' }));
@@ -666,8 +672,10 @@ const App: React.FC = () => {
 
     const fadeMs = 12;
     const fadeTime = Math.min(fadeMs / 1000, Math.max(0.003, buffer.duration / 4));
-    const overlap = fadeTime;
-    const startAt = Math.max(ctx.currentTime + 0.05, nextStartTimeRef.current);
+    // Slight overlap to hide tiny inter-chunk gaps.
+    const overlap = Math.min(0.04, fadeTime); // up to 40ms overlap
+    const desiredStart = nextStartTimeRef.current - overlap;
+    const startAt = Math.max(ctx.currentTime + 0.05, desiredStart);
     const endAt = startAt + buffer.duration;
 
     const fadeSamples = Math.max(32, Math.floor(ctx.sampleRate * fadeTime));
@@ -685,19 +693,22 @@ const App: React.FC = () => {
     gain.gain.setValueCurveAtTime(fadeOut, Math.max(startAt, endAt - fadeTime), fadeTime);
 
     source.start(startAt);
-    nextStartTimeRef.current = endAt - overlap;
+    nextStartTimeRef.current = endAt;
     audioEndTimeRef.current = Math.max(audioEndTimeRef.current, endAt);
     return { startAt, endAt };
   };
 
-  const startInference = useCallback(async () => {
-    if (!profile.name || !inferenceText) return;
+  const runInference = useCallback(async (text: string, endpoint: string) => {
+    if (!profile.name || !text) return;
     setUiNotice(null);
     await unlockAudio();
     if (audioContextRef.current?.state !== 'running') {
       setUiNotice('Safari blocked audio. Click again to enable sound.');
       return;
     }
+    await warmupProfile(profile.name);
+    // End any existing stream immediately.
+    streamSessionRef.current += 1;
     stopAllAudio();
     resetVideo();
     setStepStatuses(prev => ({ ...prev, inference: 'running' }));
@@ -714,6 +725,7 @@ const App: React.FC = () => {
     }
     const controller = new AbortController();
     streamAbortRef.current = controller;
+    const sessionId = streamSessionRef.current;
 
     const startTime = performance.now();
     let firstChunk = true;
@@ -721,7 +733,7 @@ const App: React.FC = () => {
     const payload: Record<string, any> = {
       speaker: profile.name,
       profile_type: profileType,
-      text: inferenceText,
+      text,
       model_path: modelOverride || null,
       ref_wav_path: refOverride || null,
     };
@@ -730,7 +742,6 @@ const App: React.FC = () => {
     }
 
     try {
-      const endpoint = outputMode === 'avatar' ? '/stream_avatar' : '/stream';
       const res = await fetch(`${apiBase}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -739,6 +750,9 @@ const App: React.FC = () => {
       });
       if (!res.ok) throw new Error(await res.text());
       await streamResponseLines(res, async line => {
+        if (sessionId !== streamSessionRef.current) {
+          return;
+        }
         if (sawError) return;
         let data: any;
         try {
@@ -795,10 +809,15 @@ const App: React.FC = () => {
         setInferenceStageIndex(null);
       }
     }
-  }, [apiBase, enqueueFrames, inferenceText, modelOverride, outputMode, profile.name, profileType, refOverride, resetVideo]);
+  }, [apiBase, enqueueFrames, modelOverride, outputMode, profile.name, profileType, refOverride, resetVideo, unlockAudio]);
+
+  const startInference = useCallback(async () => {
+    await runInference(inferenceText, '/speak');
+  }, [inferenceText, runInference]);
 
   const stopInference = async () => {
     if (streamAbortRef.current) streamAbortRef.current.abort();
+    streamSessionRef.current += 1;
     await resetAudio();
     resetVideo();
     setStepStatuses(prev => ({ ...prev, inference: 'idle' }));
@@ -1076,7 +1095,11 @@ const App: React.FC = () => {
                               }
                               setProfile(prev => ({ ...prev, name: item.name }));
                               setLastUploadedFilename(null);
-                              setActiveStep(item.has_profile ? 4 : 2);
+                              setLastUploadedAudioFilename(null);
+                              // Jump to generation if this profile is ready.
+                              if (item.has_profile) {
+                                setActiveStep(4);
+                              }
                             }}
                             disabled={isBusy}
                             className={`w-full flex items-center justify-between border rounded-lg px-3 py-2 text-left ${
@@ -1102,36 +1125,120 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="space-y-4">
+                  <p className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+                    Avatar setup uses two files: a video for the face loop and a separate audio file for voice training.
+                  </p>
                   <div className="relative group">
                     <input
                       type="file"
-                      accept="audio/*,video/*"
+                      accept={profileType === 'voice' ? 'audio/*' : 'video/*'}
                       onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
                       disabled={!profile.name}
                       className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
                     />
-                    <div className={`border-2 border-dashed rounded-xl p-10 text-center transition-all ${!profile.name ? 'opacity-50 bg-slate-100 border-slate-200' : 'group-hover:border-teal-600 bg-white border-slate-200'}`}>
-                      <svg className={`w-10 h-10 mx-auto mb-3 transition-colors ${!profile.name ? 'text-slate-300' : 'text-slate-400 group-hover:text-teal-600'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <div
+                      className={`border-2 border-dashed rounded-xl p-10 text-center transition-all ${
+                        !profile.name
+                          ? 'opacity-50 bg-slate-100 border-slate-200'
+                          : profile.lastUploadedFile
+                            ? 'bg-emerald-50 border-emerald-500'
+                            : 'group-hover:border-teal-600 bg-white border-slate-200'
+                      }`}
+                    >
+                      <svg
+                        className={`w-10 h-10 mx-auto mb-3 transition-colors ${
+                          !profile.name
+                            ? 'text-slate-300'
+                            : profile.lastUploadedFile
+                              ? 'text-emerald-600'
+                              : 'text-slate-400 group-hover:text-teal-600'
+                        }`}
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                       </svg>
-                      <p className="text-sm font-bold text-slate-700">
+                      <p className={`text-sm font-bold ${profile.lastUploadedFile ? 'text-emerald-700' : 'text-slate-700'}`}>
                         {profile.name
                           ? profileType === 'voice'
                             ? 'Select High-Quality Audio'
-                            : 'Select High-Quality Video (with audio)'
+                            : 'Select High-Quality Video'
                           : 'Enter Profile Name First'}
                       </p>
-                      <p className="text-xs text-slate-400 mt-1">
+                      <p className={`text-xs mt-1 ${profile.lastUploadedFile ? 'text-emerald-600' : 'text-slate-400'}`}>
                         {profileType === 'voice'
                           ? 'Lossless formats preferred (.wav, .flac)'
                           : 'Portrait video preferred (.mp4, .mov)'}
                       </p>
+                      {profile.lastUploadedFile && (
+                        <span className="inline-flex mt-3 px-3 py-1 rounded-full bg-emerald-100 text-[10px] font-bold tracking-widest text-emerald-700">
+                          Uploaded
+                        </span>
+                      )}
                     </div>
                   </div>
+                  {profileType === 'avatar' && (
+                    <div className="relative group">
+                      <input
+                        type="file"
+                        accept="audio/*"
+                        onChange={(e) => e.target.files?.[0] && handleUploadAudio(e.target.files[0])}
+                        disabled={!profile.name}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
+                      />
+                      <div
+                        className={`border-2 border-dashed rounded-xl p-8 text-center transition-all ${
+                          !profile.name
+                            ? 'opacity-50 bg-slate-100 border-slate-200'
+                            : lastUploadedAudioFilename
+                              ? 'bg-emerald-50 border-emerald-500'
+                              : 'group-hover:border-teal-600 bg-white border-slate-200'
+                        }`}
+                      >
+                        <svg
+                          className={`w-8 h-8 mx-auto mb-3 transition-colors ${
+                            !profile.name
+                              ? 'text-slate-300'
+                              : lastUploadedAudioFilename
+                                ? 'text-emerald-600'
+                                : 'text-slate-400 group-hover:text-teal-600'
+                          }`}
+                          fill="none"
+                          viewBox="0 0 24 24"
+                          stroke="currentColor"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={1.5}
+                            d="M9 19V6l12-2v13M9 19a2 2 0 11-4 0 2 2 0 014 0zm12-6a2 2 0 11-4 0 2 2 0 014 0z"
+                          />
+                        </svg>
+                        <p className={`text-sm font-bold ${lastUploadedAudioFilename ? 'text-emerald-700' : 'text-slate-700'}`}>
+                          {profile.name ? 'Upload Training Audio (Required)' : 'Enter Profile Name First'}
+                        </p>
+                        <p className={`text-xs mt-1 ${lastUploadedAudioFilename ? 'text-emerald-600' : 'text-slate-400'}`}>
+                          Use a longer audio file if you want a different voice than the video.
+                        </p>
+                        {lastUploadedAudioFilename && (
+                          <span className="inline-flex mt-3 px-3 py-1 rounded-full bg-emerald-100 text-[10px] font-bold tracking-widest text-emerald-700">
+                            Uploaded
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {profile.lastUploadedFile && (
                     <div className="bg-teal-50 border border-teal-100 p-3 rounded-lg flex items-center justify-between">
                       <span className="text-xs font-bold text-teal-800 truncate">{profile.lastUploadedFile}</span>
                       <span className="text-[10px] font-bold text-teal-600 bg-white px-2 py-1 rounded shadow-sm">{profile.fileSize}</span>
+                    </div>
+                  )}
+                  {profileType === 'avatar' && lastUploadedAudioFilename && (
+                    <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg flex items-center justify-between">
+                      <span className="text-xs font-bold text-slate-700 truncate">{lastUploadedAudioFilename}</span>
+                      <span className="text-[10px] font-bold text-slate-500 bg-white px-2 py-1 rounded shadow-sm">Audio</span>
                     </div>
                   )}
                 </div>
@@ -1163,6 +1270,38 @@ const App: React.FC = () => {
                   <p>Profile: <span className="font-semibold">{profile.name || '—'}</span></p>
                   <p>File: <span className="font-semibold">{profile.lastUploadedFile || 'Upload a file first'}</span></p>
                 </div>
+                {profileType === 'avatar' && (
+                  <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                      Avatar Cache Window
+                    </p>
+                    <div className="flex items-center justify-between gap-4 text-sm">
+                      <label className="text-slate-600 font-semibold">Start at (seconds)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.1}
+                        value={avatarStartSec}
+                        onChange={(e) => setAvatarStartSec(Number(e.target.value))}
+                        className="w-24 rounded-lg border border-slate-200 px-2 py-1 text-right text-slate-700"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-4 text-sm">
+                      <label className="text-slate-600 font-semibold">Background blur (kernel)</label>
+                      <input
+                        type="number"
+                        min={3}
+                        step={2}
+                        value={avatarBlurKernel}
+                        onChange={(e) => setAvatarBlurKernel(Number(e.target.value))}
+                        className="w-24 rounded-lg border border-slate-200 px-2 py-1 text-right text-slate-700"
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      Cache length is fixed at 10 seconds. Default start is 5s. Medium blur uses kernel 31.
+                    </p>
+                  </div>
+                )}
                 {preprocessStats ? (
                   <div className="grid grid-cols-4 gap-4 animate-in fade-in zoom-in-95">
                     {[
@@ -1183,7 +1322,10 @@ const App: React.FC = () => {
                     disabled={
                       stepStatuses.preprocess === 'running' ||
                       !profile.name ||
-                      (!lastUploadedFilename && !(currentProfileInfo?.raw_files && currentProfileInfo.raw_files > 0))
+                      (!lastUploadedFilename && !(currentProfileInfo?.raw_files && currentProfileInfo.raw_files > 0)) ||
+                      (profileType === 'avatar' &&
+                        !lastUploadedAudioFilename &&
+                        !(currentProfileInfo?.raw_audio_files && currentProfileInfo.raw_audio_files > 0))
                     }
                     className="w-full py-4 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition-all flex items-center justify-center gap-3 shadow-xl shadow-teal-600/20"
                   >
@@ -1213,35 +1355,9 @@ const App: React.FC = () => {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="md:col-span-1 bg-slate-50 p-6 rounded-2xl border border-slate-100 space-y-6">
                   <div className="space-y-3">
-                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Training Mode</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setTrainMode('fast')}
-                        className={`px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                          trainMode === 'fast'
-                            ? 'bg-teal-600 text-white shadow-lg shadow-teal-600/20'
-                            : 'bg-white text-slate-500'
-                        }`}
-                      >
-                        Fast
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setTrainMode('quality')}
-                        className={`px-3 py-2 rounded-xl text-xs font-bold transition-all ${
-                          trainMode === 'quality'
-                            ? 'bg-slate-900 text-white shadow-lg'
-                            : 'bg-white text-slate-500'
-                        }`}
-                      >
-                        High Quality
-                      </button>
-                    </div>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Training Profile</p>
                     <p className="text-[11px] text-slate-500">
-                      {trainMode === 'fast'
-                        ? 'Fewer epochs for quick iteration.'
-                        : 'Longer run with higher fidelity.'}
+                      Unified training profile (25 epochs, max_len 400). The fast/quality toggle is removed.
                     </p>
                   </div>
 
@@ -1398,23 +1514,14 @@ const App: React.FC = () => {
                   />
                 </div>
                 <div className="relative">
-                  <textarea
-                    value={inferenceText}
-                    onChange={(e) => setInferenceText(e.target.value)}
-                    placeholder="Describe something amazing in your new cloned voice..."
-                    className="w-full h-40 bg-white border-2 border-slate-100 rounded-2xl p-6 text-lg focus:ring-4 focus:ring-teal-600/10 focus:border-teal-600 outline-none transition-all font-medium resize-none shadow-sm"
+                  <ControlPanel
+                    disabled={stepStatuses.inference === 'running'}
+                    onSendChat={async (text) => runInference(text, '/chat')}
+                    onSendDirect={async (text) => {
+                      setInferenceText(text);
+                      await runInference(text, '/speak');
+                    }}
                   />
-                  <div className="absolute bottom-4 right-4 flex items-center gap-3">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{inferenceText.length} Characters</span>
-                    <button
-                      onClick={startInference}
-                      disabled={!inferenceText || stepStatuses.inference === 'running'}
-                      className="bg-teal-600 hover:bg-teal-700 disabled:bg-slate-200 text-white font-bold px-6 py-2.5 rounded-xl transition-all shadow-lg shadow-teal-600/20 flex items-center gap-2"
-                    >
-                      {stepStatuses.inference === 'running' ? 'Streaming...' : outputMode === 'avatar' ? 'Stream Avatar' : 'Stream Voice'}
-                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd"></path></svg>
-                    </button>
-                  </div>
                 </div>
 
                 <div className="flex items-center gap-3">

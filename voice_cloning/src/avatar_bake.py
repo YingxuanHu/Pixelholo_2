@@ -58,12 +58,15 @@ def bake_avatar(
     video_path: Path,
     profile_type: str = PROFILE_TYPE_AVATAR,
     fps: float = 25.0,
+    start_sec: float = 5.0,
     loop_sec: float = 10.0,
-    loop_fade_sec: float = 1.0,
+    loop_fade_sec: float = 0.0,
     resize_factor: int = 1,
     pads: tuple[int, int, int, int] = (0, 10, 0, 0),
     batch_size: int = 16,
     nosmooth: bool = False,
+    blur_background: bool = True,
+    blur_kernel: int = 31,
     device: str = "cuda",
 ) -> Path:
     cache_dir = avatar_cache_dir(profile, profile_type)
@@ -73,14 +76,20 @@ def bake_avatar(
     src_fps = cap.get(cv2.CAP_PROP_FPS) or fps
     fps = fps or src_fps or 25.0
     frame_interval = max(1, int(round(src_fps / fps))) if src_fps else 1
+    start_frame = int(round(start_sec * src_fps)) if src_fps and start_sec > 0 else 0
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     max_frames = int(loop_sec * fps) if loop_sec > 0 else None
 
     frames: list[np.ndarray] = []
-    frame_index = 0
+    frame_index = start_frame if start_frame > 0 else 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+        if start_frame and frame_index < start_frame:
+            frame_index += 1
+            continue
         if frame_index % frame_interval != 0:
             frame_index += 1
             continue
@@ -133,6 +142,16 @@ def bake_avatar(
     if not nosmooth:
         coords_arr = _smooth_boxes(coords_arr, window=5)
 
+    if blur_background:
+        k = max(3, int(blur_kernel) // 2 * 2 + 1)
+        blurred_frames: list[np.ndarray] = []
+        for frame, box in zip(frames, coords_arr):
+            y1, y2, x1, x2 = box
+            blurred = cv2.GaussianBlur(frame, (k, k), 0)
+            blurred[y1:y2, x1:x2] = frame[y1:y2, x1:x2]
+            blurred_frames.append(blurred)
+        frames = blurred_frames
+
     np.save(cache_dir / "frames.npy", np.array(frames, dtype=np.uint8))
     np.save(cache_dir / "coords.npy", coords_arr)
 
@@ -141,9 +160,12 @@ def bake_avatar(
         "source_video": str(video_path),
         "fps": float(fps),
         "frame_count": len(frames),
+        "start_sec": float(start_sec),
         "resize_factor": resize_factor,
         "pads": list(pads),
         "loop_fade_sec": float(loop_fade_sec),
+        "blur_background": bool(blur_background),
+        "blur_kernel": int(blur_kernel),
         "width": int(frames[0].shape[1]),
         "height": int(frames[0].shape[0]),
     }
@@ -162,12 +184,15 @@ def main() -> None:
         help="Profile type to store avatar cache under.",
     )
     parser.add_argument("--fps", type=float, default=25.0)
+    parser.add_argument("--start_sec", type=float, default=0.0)
     parser.add_argument("--loop_sec", type=float, default=10.0)
-    parser.add_argument("--loop_fade_sec", type=float, default=1.0)
+    parser.add_argument("--loop_fade_sec", type=float, default=0.0)
     parser.add_argument("--resize_factor", type=int, default=1)
     parser.add_argument("--pads", type=str, default="0 10 0 0")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--nosmooth", action="store_true")
+    parser.add_argument("--no_blur_background", action="store_true")
+    parser.add_argument("--blur_kernel", type=int, default=31)
     parser.add_argument("--device", type=str, default="cuda")
 
     args = parser.parse_args()
@@ -180,12 +205,15 @@ def main() -> None:
         video_path=args.video,
         profile_type=args.profile_type,
         fps=args.fps,
+        start_sec=args.start_sec,
         loop_sec=args.loop_sec,
         loop_fade_sec=args.loop_fade_sec,
         resize_factor=args.resize_factor,
         pads=pads,
         batch_size=args.batch_size,
         nosmooth=args.nosmooth,
+        blur_background=not args.no_blur_background,
+        blur_kernel=args.blur_kernel,
         device=args.device,
     )
     print(f"Avatar cached at {cache_dir}")

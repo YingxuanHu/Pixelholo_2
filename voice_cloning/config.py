@@ -10,6 +10,7 @@ INFERENCE_AUDIO_DIRNAME = "audio"
 INFERENCE_VIDEO_DIRNAME = "video"
 
 RAW_VIDEOS_DIRNAME = "raw_videos"
+RAW_AUDIO_DIRNAME = "raw_audio"
 PROCESSED_WAVS_DIRNAME = "processed_wavs"
 METADATA_FILENAME = "metadata.csv"
 AVATAR_CACHE_DIRNAME = "avatar_cache"
@@ -39,14 +40,14 @@ DEFAULT_MAX_NO_SPEECH_PROB = 0.4
 DEFAULT_MIN_WORDS = 4
 DEFAULT_MERGE_GAP_SEC = 0.2
 DEFAULT_DENOISE = False
-DEFAULT_MIN_CHUNK_DBFS = -35.0
+DEFAULT_MIN_CHUNK_DBFS = -40.0
 DEFAULT_MAX_CLIP_DBFS = None
 DEFAULT_MIN_SPEECH_RATIO = 0.6
 
 DEFAULT_BATCH_SIZE = 2
 DEFAULT_MAX_LEN = 400
 DEFAULT_FP16 = True
-DEFAULT_EPOCHS = 25
+DEFAULT_EPOCHS = 15
 
 STYLE_TTS2_DIR = BASE_DIR / "lib" / "StyleTTS2"
 
@@ -83,6 +84,10 @@ def profile_data_root(profile_type: str | None = None) -> Path:
 
 def raw_videos_dir(speaker_name: str, profile_type: str | None = None) -> Path:
     return dataset_root(speaker_name, profile_type) / RAW_VIDEOS_DIRNAME
+
+
+def raw_audio_dir(speaker_name: str, profile_type: str | None = None) -> Path:
+    return dataset_root(speaker_name, profile_type) / RAW_AUDIO_DIRNAME
 
 
 def processed_wavs_dir(speaker_name: str, profile_type: str | None = None) -> Path:

@@ -42,6 +42,7 @@ export interface ProfileInfo {
   profile_type?: string;
   has_data: boolean;
   raw_files: number;
+  raw_audio_files?: number;
   processed_wavs: number;
   has_profile: boolean;
   best_checkpoint: string | null;
