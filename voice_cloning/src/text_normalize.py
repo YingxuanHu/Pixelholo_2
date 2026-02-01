@@ -39,6 +39,10 @@ def _get_nemo_normalizer():
     return _nemo_normalizer
 
 
+def warmup_text_normalizer() -> None:
+    _get_nemo_normalizer()
+
+
 def _strip_commas(value: str) -> str:
     return value.replace(",", "")
 
@@ -81,6 +85,10 @@ def clean_text_for_tts(text: str) -> str:
     """
     if not text:
         return text
+
+    # Strip markdown bullets/asterisks so TTS doesn't read them aloud.
+    text = re.sub(r"(^|\n)\s*[*+-]\s+", r"\1", text)
+    text = text.replace("*", " ")
 
     # Address-style "St" -> "Street" (avoid "Saint" in addresses)
     text = re.sub(r"\b(\d+)\s+St\.?\b", r"\1 Street", text)

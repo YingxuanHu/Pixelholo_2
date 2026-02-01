@@ -19,6 +19,8 @@ resemblyzer
 opencv-python
 num2words
 nemo_text_processing
+groq
+python-dotenv
 click
 tensorboard
 munch
