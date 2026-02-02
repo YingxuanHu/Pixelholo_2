@@ -538,7 +538,7 @@ def main() -> None:
         max_chunk_words = defaults.get("max_chunk_words", 45)
     pause_ms = args.pause_ms
     if pause_ms is None:
-        pause_ms = defaults.get("pause_ms", 180)
+        pause_ms = defaults.get("pause_ms", 40)
     crossfade_ms = args.crossfade_ms
     if crossfade_ms is None:
         crossfade_ms = defaults.get("crossfade_ms", 8.0)

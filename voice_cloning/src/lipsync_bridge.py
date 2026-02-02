@@ -1,4 +1,5 @@
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -8,6 +9,8 @@ import numpy as np
 import torch
 
 from config import LIP_SYNCING_DIR, PROFILE_TYPE_AVATAR, avatar_cache_dir
+
+logger = logging.getLogger("pixelholo.lipsync")
 
 
 class LipSyncBridge:
@@ -89,9 +92,26 @@ class LipSyncBridge:
                 import json
 
                 data = json.loads(meta)
-                self.fps = float(data.get("fps", self.fps))
+                if isinstance(data, dict) and "fps" in data:
+                    self.fps = float(data.get("fps", self.fps))
+                else:
+                    logger.warning(
+                        "component=lipsync op=load_profile fallback=default_fps reason=missing_fps profile=%s profile_type=%s",
+                        profile,
+                        profile_type,
+                    )
             except Exception:
-                pass
+                logger.warning(
+                    "component=lipsync op=load_profile fallback=default_fps reason=invalid_meta profile=%s profile_type=%s",
+                    profile,
+                    profile_type,
+                )
+        else:
+            logger.warning(
+                "component=lipsync op=load_profile fallback=default_fps reason=meta_missing profile=%s profile_type=%s",
+                profile,
+                profile_type,
+            )
         self.frame_idx = 0
 
     def _mel_chunks(self, audio_16k: np.ndarray, fps: float | None = None) -> list[np.ndarray]:

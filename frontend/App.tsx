@@ -26,6 +26,33 @@ type TrainParams = {
   maxLen: number;
 };
 
+const DEFAULT_API_BASE = 'http://127.0.0.1:8000';
+const LOCAL_STORAGE_API_BASE_KEY = 'voxclone_api_base';
+const DEFAULT_PROFILE_TYPE: 'voice' | 'avatar' = 'voice';
+const DEFAULT_OUTPUT_MODE: 'voice' | 'avatar' = 'voice';
+const DEFAULT_AVATAR_START_SEC = 5;
+const BLUR_KERNEL_BY_LEVEL = { low: 60, medium: 75, high: 90 } as const;
+const DEFAULT_AVATAR_BLUR_LEVEL: keyof typeof BLUR_KERNEL_BY_LEVEL = 'medium';
+const DEFAULT_VIDEO_FPS = 25;
+const DEFAULT_AUDIO_START_DELAY_SEC = 0.05;
+const formatBytes = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return '0 MB';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let idx = 0;
+  let size = value;
+  while (size >= 1024 && idx < units.length - 1) {
+    size /= 1024;
+    idx += 1;
+  }
+  return `${size.toFixed(idx <= 1 ? 0 : 1)} ${units[idx]}`;
+};
+const DEFAULT_STEP_STATUSES: Record<string, StepStatus> = {
+  upload: 'idle',
+  preprocess: 'idle',
+  train: 'idle',
+  inference: 'idle',
+};
+
 const createLog = (message: string, level: LogEntry['level'] = 'info'): LogEntry => ({
   id: Math.random().toString(36).slice(2, 10),
   timestamp: new Date().toLocaleTimeString([], {
@@ -55,21 +82,16 @@ const trainPreset: TrainParams = { batchSize: 2, epochs: 15, maxLen: 400 };
 
 const App: React.FC = () => {
   const [activeStep, setActiveStep] = useState(1);
-  const [apiBase, setApiBase] = useState('http://127.0.0.1:8000');
+  const [apiBase, setApiBase] = useState(DEFAULT_API_BASE);
   const [apiStatus, setApiStatus] = useState<'online' | 'offline' | 'checking'>('checking');
-  const [profileType, setProfileType] = useState<'voice' | 'avatar'>('voice');
+  const [profileType, setProfileType] = useState<'voice' | 'avatar'>(DEFAULT_PROFILE_TYPE);
   const [profile, setProfile] = useState<Profile>({ name: '', lastUploadedFile: null, fileSize: null });
   const [lastUploadedFilename, setLastUploadedFilename] = useState<string | null>(null);
   const [lastUploadedAudioFilename, setLastUploadedAudioFilename] = useState<string | null>(null);
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [profilesStatus, setProfilesStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [uiNotice, setUiNotice] = useState<string | null>(null);
-  const [stepStatuses, setStepStatuses] = useState<Record<string, StepStatus>>({
-    upload: 'idle',
-    preprocess: 'idle',
-    train: 'idle',
-    inference: 'idle',
-  });
+  const [stepStatuses, setStepStatuses] = useState<Record<string, StepStatus>>(DEFAULT_STEP_STATUSES);
   const [preprocessLogs, setPreprocessLogs] = useState<LogEntry[]>([]);
   const [trainLogs, setTrainLogs] = useState<LogEntry[]>([]);
   const [preprocessStats, setPreprocessStats] = useState<PreprocessStats | null>(null);
@@ -81,16 +103,26 @@ const App: React.FC = () => {
   const [trainFlags, setTrainFlags] = useState<TrainFlags>(defaultFlags);
   const [trainParams, setTrainParams] = useState<TrainParams>(defaultTrainParams);
   const [showAdvancedTrain, setShowAdvancedTrain] = useState(false);
-  const [avatarStartSec, setAvatarStartSec] = useState(5);
-  const [avatarBlurKernel, setAvatarBlurKernel] = useState(31);
+  const [avatarStartSec, setAvatarStartSec] = useState(DEFAULT_AVATAR_START_SEC);
+  const [avatarBlurLevel, setAvatarBlurLevel] = useState<keyof typeof BLUR_KERNEL_BY_LEVEL>(
+    DEFAULT_AVATAR_BLUR_LEVEL,
+  );
+  const [uploadPhaseVideo, setUploadPhaseVideo] = useState<'idle' | 'uploading' | 'error'>('idle');
+  const [uploadPhaseAudio, setUploadPhaseAudio] = useState<'idle' | 'uploading' | 'error'>('idle');
+  const [uploadProgressVideo, setUploadProgressVideo] = useState(0);
+  const [uploadProgressAudio, setUploadProgressAudio] = useState(0);
+  const [uploadBytesVideo, setUploadBytesVideo] = useState<{ loaded: number; total: number }>({ loaded: 0, total: 0 });
+  const [uploadBytesAudio, setUploadBytesAudio] = useState<{ loaded: number; total: number }>({ loaded: 0, total: 0 });
+  const uploadVideoLastPctRef = useRef(0);
+  const uploadAudioLastPctRef = useRef(0);
   const [inferenceText, setInferenceText] = useState('');
   const [inferenceChunks, setInferenceChunks] = useState<InferenceChunk[]>([]);
   const [latency, setLatency] = useState<{ ttfa: number; total: number } | null>(null);
   const [modelOverride, setModelOverride] = useState('');
   const [refOverride, setRefOverride] = useState('');
-  const [outputMode, setOutputMode] = useState<'voice' | 'avatar'>('voice');
+  const [outputMode, setOutputMode] = useState<'voice' | 'avatar'>(DEFAULT_OUTPUT_MODE);
   const [videoState, setVideoState] = useState<'idle' | 'buffering' | 'playing'>('idle');
-  const [videoFps, setVideoFps] = useState(25);
+  const [videoFps, setVideoFps] = useState(DEFAULT_VIDEO_FPS);
   const [videoQueue, setVideoQueue] = useState(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -107,23 +139,44 @@ const App: React.FC = () => {
   const videoRafRef = useRef<number | null>(null);
   const videoStartTimeRef = useRef<number | null>(null);
   const videoNextFrameTimeRef = useRef<number | null>(null);
-  const audioStartDelayRef = useRef<number>(0.05);
-  const videoFpsRef = useRef<number>(25);
+  const audioStartDelayRef = useRef<number>(DEFAULT_AUDIO_START_DELAY_SEC);
+  const videoFpsRef = useRef<number>(DEFAULT_VIDEO_FPS);
   const frameQueueRef = useRef<{ img: string; t: number }[]>([]);
 
   useEffect(() => {
     setTrainParams(trainPreset);
   }, []);
 
+  const uploadWithProgress = useCallback((url: string, form: FormData, onProgress: (loaded: number, total: number) => void) => {
+    return new Promise<string>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          onProgress(event.loaded, event.total);
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(xhr.responseText);
+        } else {
+          reject(new Error(xhr.responseText || `Upload failed (${xhr.status})`));
+        }
+      };
+      xhr.onerror = () => reject(new Error('Upload failed'));
+      xhr.send(form);
+    });
+  }, []);
+
   useEffect(() => {
     if (profileType === 'avatar') {
-      setAvatarStartSec(5);
-      setAvatarBlurKernel(31);
+      setAvatarStartSec(DEFAULT_AVATAR_START_SEC);
+      setAvatarBlurLevel(DEFAULT_AVATAR_BLUR_LEVEL);
     }
   }, [profileType]);
 
   useEffect(() => {
-    const cached = localStorage.getItem('voxclone_api_base');
+    const cached = localStorage.getItem(LOCAL_STORAGE_API_BASE_KEY);
     if (cached) setApiBase(cached);
   }, []);
 
@@ -138,7 +191,7 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('voxclone_api_base', apiBase);
+    localStorage.setItem(LOCAL_STORAGE_API_BASE_KEY, apiBase);
   }, [apiBase]);
 
   useEffect(() => {
@@ -311,14 +364,23 @@ const App: React.FC = () => {
     if (!profile.name || !file) return;
     setUiNotice(null);
     setStepStatuses(prev => ({ ...prev, upload: 'running' }));
+    setUploadPhaseVideo('uploading');
+    setUploadProgressVideo(0);
+    setUploadBytesVideo({ loaded: 0, total: 0 });
     const form = new FormData();
     form.append('profile', profile.name);
     form.append('profile_type', profileType);
     form.append('file', file);
     try {
-      const res = await fetch(`${apiBase}/upload`, { method: 'POST', body: form });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const responseText = await uploadWithProgress(`${apiBase}/upload`, form, (loaded, total) => {
+        const pct = Math.round((loaded / Math.max(total, 1)) * 100);
+        if (pct !== uploadVideoLastPctRef.current || loaded === total) {
+          uploadVideoLastPctRef.current = pct;
+          setUploadProgressVideo(pct);
+        }
+        setUploadBytesVideo({ loaded, total });
+      });
+      const data = JSON.parse(responseText);
       setProfile(prev => ({
         ...prev,
         lastUploadedFile: file.name,
@@ -326,9 +388,11 @@ const App: React.FC = () => {
       }));
       setLastUploadedFilename(data.filename);
       setStepStatuses(prev => ({ ...prev, upload: 'done' }));
+      setUploadPhaseVideo('idle');
       loadProfiles();
     } catch (err) {
       setStepStatuses(prev => ({ ...prev, upload: 'error' }));
+      setUploadPhaseVideo('error');
       setPreprocessLogs([createLog(`Upload failed: ${String(err)}`, 'error')]);
     }
   };
@@ -337,18 +401,29 @@ const App: React.FC = () => {
     if (!profile.name) return;
     setUiNotice(null);
     setStepStatuses(prev => ({ ...prev, upload: 'running' }));
+    setUploadPhaseAudio('uploading');
+    setUploadProgressAudio(0);
+    setUploadBytesAudio({ loaded: 0, total: 0 });
     const form = new FormData();
     form.append('profile', profile.name);
     form.append('profile_type', profileType);
     form.append('file', file);
     try {
-      const res = await fetch(`${apiBase}/upload_audio`, { method: 'POST', body: form });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const responseText = await uploadWithProgress(`${apiBase}/upload_audio`, form, (loaded, total) => {
+        const pct = Math.round((loaded / Math.max(total, 1)) * 100);
+        if (pct !== uploadAudioLastPctRef.current || loaded === total) {
+          uploadAudioLastPctRef.current = pct;
+          setUploadProgressAudio(pct);
+        }
+        setUploadBytesAudio({ loaded, total });
+      });
+      const data = JSON.parse(responseText);
       setLastUploadedAudioFilename(data.filename);
       setStepStatuses(prev => ({ ...prev, upload: 'done' }));
+      setUploadPhaseAudio('idle');
     } catch (err) {
       setStepStatuses(prev => ({ ...prev, upload: 'error' }));
+      setUploadPhaseAudio('error');
       setPreprocessLogs([createLog(`Audio upload failed: ${String(err)}`, 'error')]);
     }
   };
@@ -371,7 +446,7 @@ const App: React.FC = () => {
       avatar_start_sec: profileType === 'avatar' ? avatarStartSec : null,
       avatar_loop_sec: profileType === 'avatar' ? 10 : null,
       avatar_blur_background: profileType === 'avatar',
-      avatar_blur_kernel: profileType === 'avatar' ? avatarBlurKernel : null,
+      avatar_blur_kernel: profileType === 'avatar' ? BLUR_KERNEL_BY_LEVEL[avatarBlurLevel] : null,
     };
     try {
       const res = await fetch(`${apiBase}/preprocess`, {
@@ -1111,7 +1186,7 @@ const App: React.FC = () => {
                             <div>
                               <p className="text-xs font-bold">{item.name}</p>
                               <p className="text-[10px] text-slate-400">
-                                {item.processed_wavs} clips · {item.raw_files} raw · {item.profile_type || profileType}
+                                {item.processed_wavs} clips · {(item.raw_audio_files ?? 0)} audio · {item.raw_files} video · {item.profile_type || profileType}
                               </p>
                             </div>
                             <div className="text-[10px] font-bold">
@@ -1168,7 +1243,7 @@ const App: React.FC = () => {
                       </p>
                       <p className={`text-xs mt-1 ${profile.lastUploadedFile ? 'text-emerald-600' : 'text-slate-400'}`}>
                         {profileType === 'voice'
-                          ? 'Lossless formats preferred (.wav, .flac)'
+                          ? 'Lossless formats preferred (.wav, .flac). MP4 works if it contains audio.'
                           : 'Portrait video preferred (.mp4, .mov)'}
                       </p>
                       {profile.lastUploadedFile && (
@@ -1176,13 +1251,30 @@ const App: React.FC = () => {
                           Uploaded
                         </span>
                       )}
+                      {uploadPhaseVideo !== 'idle' && profile.name && (
+                        <div className="mt-4 flex flex-col items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex h-3 w-3 rounded-full border-2 border-slate-300 border-t-emerald-500 animate-spin" />
+                            {uploadPhaseVideo === 'uploading'
+                              ? uploadProgressVideo >= 100
+                                ? 'Processing file'
+                                : 'Uploading file'
+                              : 'Upload failed'}
+                          </div>
+                          {uploadPhaseVideo === 'uploading' && (
+                            <span className="text-[11px] font-semibold text-slate-600">
+                              {formatBytes(uploadBytesVideo.loaded)} / {formatBytes(uploadBytesVideo.total)} · {uploadProgressVideo}%
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                   {profileType === 'avatar' && (
                     <div className="relative group">
                       <input
                         type="file"
-                        accept="audio/*"
+                        accept="audio/*,video/*"
                         onChange={(e) => e.target.files?.[0] && handleUploadAudio(e.target.files[0])}
                         disabled={!profile.name}
                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10 disabled:cursor-not-allowed"
@@ -1219,12 +1311,29 @@ const App: React.FC = () => {
                           {profile.name ? 'Upload Training Audio (Required)' : 'Enter Profile Name First'}
                         </p>
                         <p className={`text-xs mt-1 ${lastUploadedAudioFilename ? 'text-emerald-600' : 'text-slate-400'}`}>
-                          Use a longer audio file if you want a different voice than the video.
+                          Audio files and videos with audio (.mp4, .mov) are both accepted.
                         </p>
                         {lastUploadedAudioFilename && (
                           <span className="inline-flex mt-3 px-3 py-1 rounded-full bg-emerald-100 text-[10px] font-bold tracking-widest text-emerald-700">
                             Uploaded
                           </span>
+                        )}
+                        {uploadPhaseAudio !== 'idle' && profile.name && (
+                          <div className="mt-4 flex flex-col items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                            <div className="flex items-center gap-2">
+                              <span className="inline-flex h-3 w-3 rounded-full border-2 border-slate-300 border-t-emerald-500 animate-spin" />
+                              {uploadPhaseAudio === 'uploading'
+                                ? uploadProgressAudio >= 100
+                                  ? 'Processing file'
+                                  : 'Uploading file'
+                                : 'Upload failed'}
+                            </div>
+                            {uploadPhaseAudio === 'uploading' && (
+                              <span className="text-[11px] font-semibold text-slate-600">
+                                {formatBytes(uploadBytesAudio.loaded)} / {formatBytes(uploadBytesAudio.total)} · {uploadProgressAudio}%
+                              </span>
+                            )}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1287,18 +1396,26 @@ const App: React.FC = () => {
                       />
                     </div>
                     <div className="flex items-center justify-between gap-4 text-sm">
-                      <label className="text-slate-600 font-semibold">Background blur (kernel)</label>
-                      <input
-                        type="number"
-                        min={3}
-                        step={2}
-                        value={avatarBlurKernel}
-                        onChange={(e) => setAvatarBlurKernel(Number(e.target.value))}
-                        className="w-24 rounded-lg border border-slate-200 px-2 py-1 text-right text-slate-700"
-                      />
+                      <label className="text-slate-600 font-semibold">Background blur</label>
+                      <div className="flex items-center gap-2">
+                        {(['low', 'medium', 'high'] as const).map((level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            onClick={() => setAvatarBlurLevel(level)}
+                            className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${
+                              avatarBlurLevel === level
+                                ? 'bg-teal-600 text-white'
+                                : 'bg-slate-100 text-slate-500'
+                            }`}
+                          >
+                            {level}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                     <p className="text-[11px] text-slate-500">
-                      Cache length is fixed at 10 seconds. Default start is 5s. Medium blur uses kernel 31.
+                      Cache length is fixed at 10 seconds. Default start is 5s. Low=60, Medium=75, High=90.
                     </p>
                   </div>
                 )}
@@ -1485,8 +1602,8 @@ const App: React.FC = () => {
                       <span className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Avatar Preview</span>
                       <span className="text-[10px] font-bold text-teal-300">{outputMode === 'avatar' ? `${videoFps} FPS · ${videoQueue} queued` : 'disabled'}</span>
                     </div>
-                    <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[240px] w-full max-w-[320px] mx-auto">
-                      <canvas ref={videoCanvasRef} width={360} height={480} className="w-full h-full" />
+                    <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[420px] w-full max-w-[420px] mx-auto">
+                      <canvas ref={videoCanvasRef} width={420} height={560} className="w-full h-full" />
                     </div>
                     <div className="mt-3 text-[11px] text-slate-400 flex items-center justify-between">
                       <span>Status: <span className="font-semibold text-slate-200">{videoState}</span></span>
@@ -1516,6 +1633,7 @@ const App: React.FC = () => {
                 <div className="relative">
                   <ControlPanel
                     disabled={stepStatuses.inference === 'running'}
+                    onInterrupt={stopInference}
                     onSendChat={async (text) => runInference(text, '/chat')}
                     onSendDirect={async (text) => {
                       setInferenceText(text);

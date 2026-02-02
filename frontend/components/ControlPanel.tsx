@@ -6,17 +6,24 @@ type Mode = 'chat' | 'tts';
 type ControlPanelProps = {
   onSendChat: (text: string) => Promise<void> | void;
   onSendDirect: (text: string) => Promise<void> | void;
+  onInterrupt?: () => Promise<void> | void;
   disabled?: boolean;
 };
 
-const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, disabled }) => {
+const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, onInterrupt, disabled }) => {
   const [mode, setMode] = useState<Mode>('tts');
   const [text, setText] = useState('');
+  const [chatText, setChatText] = useState('');
   const [isSending, setIsSending] = useState(false);
 
   const handleSend = useCallback(
     async (selectedMode: Mode, inputText: string) => {
-      if (!inputText.trim() || isSending || disabled) return;
+      if (!inputText.trim() || isSending) return;
+      if (disabled && onInterrupt) {
+        await onInterrupt();
+      } else if (disabled) {
+        return;
+      }
       setIsSending(true);
       try {
         if (selectedMode === 'chat') {
@@ -24,7 +31,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, d
         } else {
           await onSendDirect(inputText);
         }
-        setText('');
       } finally {
         setIsSending(false);
       }
@@ -34,7 +40,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, d
 
   const onSpeechResult = useCallback(
     async (spoken: string) => {
-      setText(spoken);
+      setChatText(spoken);
       await handleSend('chat', spoken);
     },
     [handleSend],
@@ -64,25 +70,25 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, d
       </div>
 
       <textarea
-        value={mode === 'chat' && transcript ? transcript : text}
-        onChange={(e) => setText(e.target.value)}
+        value={mode === 'chat' ? (transcript || chatText) : text}
+        onChange={(e) => (mode === 'chat' ? setChatText(e.target.value) : setText(e.target.value))}
         placeholder={mode === 'chat' ? 'Ask the assistant…' : 'Type what to say…'}
         className="h-24 w-full rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-white outline-none"
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            handleSend(mode, text);
+            handleSend(mode, mode === 'chat' ? chatText : text);
           }
         }}
       />
 
       <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-        <span>{text.length} chars</span>
+        <span>{mode === 'chat' ? chatText.length : text.length} chars</span>
         <div className="flex items-center gap-2">
           {mode === 'chat' && hasSupport && (
             <button
               onClick={startListening}
-              disabled={disabled || isSending}
+              disabled={isSending}
               className={`rounded-lg px-3 py-2 text-xs font-bold ${
                 isListening ? 'bg-rose-500 text-white' : 'bg-slate-800 text-slate-200'
               }`}
@@ -91,8 +97,8 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, d
             </button>
           )}
           <button
-            onClick={() => handleSend(mode, text)}
-            disabled={disabled || isSending}
+            onClick={() => handleSend(mode, mode === 'chat' ? chatText : text)}
+            disabled={isSending}
             className="rounded-lg bg-teal-600 px-4 py-2 text-xs font-bold text-white"
           >
             {isSending ? 'Processing…' : mode === 'chat' ? 'Send to LLM' : 'Generate'}

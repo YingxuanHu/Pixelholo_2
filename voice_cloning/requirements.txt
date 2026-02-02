@@ -7,7 +7,7 @@ pydub
 fastapi
 uvicorn
 python-multipart
-numpy
+numpy<2
 scipy
 pyyaml
 librosa
@@ -17,6 +17,7 @@ soundfile
 transformers
 resemblyzer
 opencv-python
+rembg
 num2words
 nemo_text_processing
 groq
@@ -31,3 +32,4 @@ einops
 einops-exts
 tqdm
 git+https://github.com/resemble-ai/monotonic_align.git
+networkx<3
