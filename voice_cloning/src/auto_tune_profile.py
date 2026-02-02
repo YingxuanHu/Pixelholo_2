@@ -453,7 +453,7 @@ def main() -> None:
     parser.add_argument("--lexicon_path", type=Path, help="Lexicon JSON for phoneme overrides.")
     parser.add_argument("--max_chunk_chars", type=int, default=180, help="Default max chunk chars.")
     parser.add_argument("--max_chunk_words", type=int, default=45, help="Default max chunk words.")
-    parser.add_argument("--pause_ms", type=int, default=180, help="Default pause between chunks (ms).")
+    parser.add_argument("--pause_ms", type=int, default=40, help="Default pause between chunks (ms).")
     parser.add_argument(
         "--crossfade_ms",
         type=float,
@@ -530,7 +530,7 @@ def main() -> None:
 
     alphas = _parse_list(args.alphas, [0.6])
     betas = _parse_list(args.betas, [0.7])
-    diffusions = _parse_int_list(args.diffusions, [20])
+    diffusions = _parse_int_list(args.diffusions, [15])
     embeddings = _parse_list(args.embeddings, [1.2])
 
     print(f"Using model: {model_path}")

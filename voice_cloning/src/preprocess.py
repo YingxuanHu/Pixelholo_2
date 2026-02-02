@@ -16,7 +16,6 @@ sys.path.append(str(PROJECT_ROOT))
 from config import (  # noqa: E402
     DEFAULT_COMPUTE_TYPE,
     DEFAULT_DEVICE,
-    DEFAULT_DENOISE,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_CLIP_DBFS,
     DEFAULT_MAX_NO_SPEECH_PROB,
@@ -43,11 +42,8 @@ from config import (  # noqa: E402
 
 
 
-def _run_ffmpeg_extract(video_path: Path, wav_path: Path, denoise: bool) -> None:
-    filters = ["highpass=f=80", "lowpass=f=8000"]
-    if denoise:
-        _log("Denoise flag is set, but only HP/LP filters are applied.")
-    filters.append(f"loudnorm=I={TARGET_LUFS}:TP=-2:LRA=7")
+def _run_ffmpeg_extract(video_path: Path, wav_path: Path) -> None:
+    filters = ["highpass=f=80", "lowpass=f=8000", f"loudnorm=I={TARGET_LUFS}:TP=-2:LRA=7"]
     command = [
         "ffmpeg",
         "-y",
@@ -237,7 +233,6 @@ def process_video(
     max_no_speech_prob: float = DEFAULT_MAX_NO_SPEECH_PROB,
     min_words: int = DEFAULT_MIN_WORDS,
     merge_gap_sec: float = DEFAULT_MERGE_GAP_SEC,
-    denoise: bool = DEFAULT_DENOISE,
     min_chunk_dbfs: float | None = DEFAULT_MIN_CHUNK_DBFS,
     max_clip_dbfs: float | None = DEFAULT_MAX_CLIP_DBFS,
     min_speech_ratio: float | None = DEFAULT_MIN_SPEECH_RATIO,
@@ -252,7 +247,7 @@ def process_video(
     avatar_batch_size: int = 16,
     avatar_nosmooth: bool = False,
     avatar_blur_background: bool = True,
-    avatar_blur_kernel: int = 31,
+    avatar_blur_kernel: int = 75,
     avatar_device: str | None = None,
     quiet: bool = False,
 ) -> Path:
@@ -299,11 +294,11 @@ def process_video(
         copied_audio = audio_dir / audio_path.name
         if audio_path.resolve() != copied_audio.resolve():
             shutil.copy2(audio_path, copied_audio)
-        _log(f"Extracting audio from {copied_audio.name} (denoise={denoise})...")
-        _run_ffmpeg_extract(copied_audio, extracted_wav, denoise=denoise)
+        _log(f"Extracting audio from {copied_audio.name}...")
+        _run_ffmpeg_extract(copied_audio, extracted_wav)
     else:
-        _log(f"Extracting audio from {copied_video.name} (denoise={denoise})...")
-        _run_ffmpeg_extract(copied_video, extracted_wav, denoise=denoise)
+        _log(f"Extracting audio from {copied_video.name}...")
+        _run_ffmpeg_extract(copied_video, extracted_wav)
 
     audio = AudioSegment.from_wav(extracted_wav)
     if audio.frame_rate != DEFAULT_SAMPLE_RATE:
@@ -464,7 +459,6 @@ def main() -> None:
     parser.add_argument("--max_no_speech_prob", type=float, default=DEFAULT_MAX_NO_SPEECH_PROB)
     parser.add_argument("--min_words", type=int, default=DEFAULT_MIN_WORDS)
     parser.add_argument("--merge_gap_sec", type=float, default=DEFAULT_MERGE_GAP_SEC)
-    parser.add_argument("--denoise", action="store_true", default=DEFAULT_DENOISE)
     parser.add_argument("--min_chunk_dbfs", type=float, default=DEFAULT_MIN_CHUNK_DBFS)
     parser.add_argument("--max_clip_dbfs", type=float, default=DEFAULT_MAX_CLIP_DBFS)
     parser.add_argument("--min_speech_ratio", type=float, default=DEFAULT_MIN_SPEECH_RATIO)
@@ -490,7 +484,6 @@ def main() -> None:
         max_no_speech_prob=args.max_no_speech_prob,
         min_words=args.min_words,
         merge_gap_sec=args.merge_gap_sec,
-        denoise=args.denoise,
         min_chunk_dbfs=args.min_chunk_dbfs,
         max_clip_dbfs=args.max_clip_dbfs,
         min_speech_ratio=args.min_speech_ratio,
@@ -498,7 +491,7 @@ def main() -> None:
         bake_avatar=False,
         quiet=args.quiet,
     )
-    print(f"Metadata written to {meta_path}")
+    print(f"Metadata written to {meta_path}", flush=True)
 
 
 if __name__ == "__main__":
