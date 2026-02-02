@@ -18,6 +18,10 @@ transformers
 resemblyzer
 opencv-python
 rembg
+basicsr
+facexlib
+gfpgan
+realesrgan
 num2words
 nemo_text_processing
 groq
