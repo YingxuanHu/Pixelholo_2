@@ -90,19 +90,6 @@ If you see an "externally-managed-environment" error, use `.venv/bin/python -m p
 
 System deps: `ffmpeg`, `espeak-ng`.
 
-### Optional: GFPGAN face enhancement (sharper lips)
-GFPGAN improves mouth/teeth clarity for full-body shots. Install its deps and download the model:
-```bash
-python -m pip install basicsr facexlib gfpgan
-# Optional background enhancer (not required for face-only)
-python -m pip install realesrgan
-
-# Model file (expected path):
-mkdir -p models/gfpgan
-wget -O models/gfpgan/GFPGANv1.3.pth \
-  https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth
-```
-
 Clone StyleTTS2 and download LibriTTS weights:
 ```bash
 mkdir -p lib
