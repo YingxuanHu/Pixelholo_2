@@ -28,7 +28,6 @@ from config import (  # noqa: E402
     DEFAULT_F_MAX,
     DEFAULT_FP16,
     DEFAULT_MAX_LEN,
-    DEFAULT_MIN_SPEECH_RATIO,
     METADATA_FILENAME,
     PROCESSED_WAVS_DIRNAME,
     PROFILE_TYPE_AVATAR,
@@ -169,7 +168,7 @@ def _write_train_val_lists(
             handle.write(f"{line}\n")
 
     if skipped:
-        print(f"Skipped {skipped} metadata rows due to max_text limits.")
+        print(f"Skipped {skipped} metadata rows due to max_text limits.", flush=True)
 
     return train_list, val_list, ood_list
 
@@ -497,8 +496,8 @@ def main() -> None:
     with output_config_path.open("w") as handle:
         yaml.dump(config, handle, default_flow_style=False)
 
-    print(f"Base config: {base_config_path}")
-    print(f"Patched config: {output_config_path}")
+    print(f"Base config: {base_config_path}", flush=True)
+    print(f"Patched config: {output_config_path}", flush=True)
 
     if args.dry_run:
         return
@@ -510,7 +509,7 @@ def main() -> None:
         use_accelerate=args.use_accelerate,
     )
     train_elapsed = time.perf_counter() - train_start
-    print(f"Training time: {train_elapsed:.2f}s")
+    print(f"Training time: {train_elapsed:.2f}s", flush=True)
 
     latest_ckpt = _latest_checkpoint(output_dir)
     if latest_ckpt is None:
@@ -520,7 +519,7 @@ def main() -> None:
     if args.auto_tune_profile or args.auto_select_epoch:
         auto_ref = _auto_pick_ref_wav(args.dataset_path)
         if auto_ref:
-            print(f"Auto-picked reference wav: {auto_ref}")
+            print(f"Auto-picked reference wav: {auto_ref}", flush=True)
 
     if args.auto_select_epoch:
         select_script = PROJECT_ROOT / "src" / "auto_select_epoch.py"
@@ -604,7 +603,7 @@ def main() -> None:
         subprocess.run(command, check=True)
 
     total_elapsed = time.perf_counter() - pipeline_start
-    print(f"Total pipeline time: {total_elapsed:.2f}s")
+    print(f"Total pipeline time: {total_elapsed:.2f}s", flush=True)
 
 
 if __name__ == "__main__":

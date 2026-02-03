@@ -176,26 +176,6 @@ const StepCard: React.FC<StepCardProps> = ({
         </div>
       </div>
       
-      {status === 'running' && (
-        <div className="absolute top-0 left-0 w-full h-1 bg-slate-100">
-          {progress === null ? (
-            <div className="h-full bg-amber-500 animate-[loading_2s_infinite]"></div>
-          ) : (
-            <div
-              className="h-full bg-amber-500 transition-all duration-500"
-              style={{ width: `${Math.min(100, Math.max(2, progress * 100))}%` }}
-            ></div>
-          )}
-        </div>
-      )}
-
-      <style>{`
-        @keyframes loading {
-          0% { width: 0; left: 0; }
-          50% { width: 40%; left: 30%; }
-          100% { width: 0; left: 100%; }
-        }
-      `}</style>
     </div>
   );
 };

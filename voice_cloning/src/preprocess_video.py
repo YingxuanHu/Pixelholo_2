@@ -9,7 +9,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from config import (
     DEFAULT_COMPUTE_TYPE,
     DEFAULT_DEVICE,
-    DEFAULT_DENOISE,
     DEFAULT_LANGUAGE,
     DEFAULT_MAX_CLIP_DBFS,
     DEFAULT_MAX_NO_SPEECH_PROB,
@@ -17,9 +16,8 @@ from config import (
     DEFAULT_MODEL_SIZE,
     DEFAULT_MIN_AVG_LOGPROB,
     DEFAULT_MIN_CHUNK_DBFS,
-    DEFAULT_MIN_SPEECH_RATIO,
     DEFAULT_MIN_WORDS,
-    DEFAULT_VAD_FILTER,
+    DEFAULT_MIN_SPEECH_RATIO,
     PROFILE_TYPE_AVATAR,
 )
 from src.preprocess import process_video
@@ -45,7 +43,6 @@ def main() -> None:
     parser.add_argument("--max_no_speech_prob", type=float, default=DEFAULT_MAX_NO_SPEECH_PROB)
     parser.add_argument("--min_words", type=int, default=DEFAULT_MIN_WORDS)
     parser.add_argument("--merge_gap_sec", type=float, default=DEFAULT_MERGE_GAP_SEC)
-    parser.add_argument("--denoise", action="store_true", default=DEFAULT_DENOISE)
     parser.add_argument("--min_chunk_dbfs", type=float, default=DEFAULT_MIN_CHUNK_DBFS)
     parser.add_argument("--max_clip_dbfs", type=float, default=DEFAULT_MAX_CLIP_DBFS)
     parser.add_argument("--min_speech_ratio", type=float, default=DEFAULT_MIN_SPEECH_RATIO)
@@ -61,7 +58,7 @@ def main() -> None:
     parser.add_argument("--avatar_batch_size", type=int, default=16)
     parser.add_argument("--avatar_nosmooth", action="store_true")
     parser.add_argument("--avatar_no_blur_background", action="store_true")
-    parser.add_argument("--avatar_blur_kernel", type=int, default=31)
+    parser.add_argument("--avatar_blur_kernel", type=int, default=75)
     parser.add_argument("--avatar_device", type=str, default=None)
     parser.add_argument("--quiet", action="store_true", help="Reduce preprocessing logs")
 
@@ -84,7 +81,6 @@ def main() -> None:
         max_no_speech_prob=args.max_no_speech_prob,
         min_words=args.min_words,
         merge_gap_sec=args.merge_gap_sec,
-        denoise=args.denoise,
         min_chunk_dbfs=args.min_chunk_dbfs,
         max_clip_dbfs=args.max_clip_dbfs,
         min_speech_ratio=args.min_speech_ratio,
@@ -103,7 +99,7 @@ def main() -> None:
         avatar_device=args.avatar_device,
         quiet=args.quiet,
     )
-    print(f"Metadata written to {meta_path}")
+    print(f"Metadata written to {meta_path}", flush=True)
 
 
 if __name__ == "__main__":

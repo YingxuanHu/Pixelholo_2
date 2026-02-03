@@ -86,6 +86,56 @@ def clean_text_for_tts(text: str) -> str:
     if not text:
         return text
 
+    # Normalize smart quotes/dashes to avoid phonemizer confusion.
+    text = (
+        text.replace("’", "'")
+        .replace("‘", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("—", ", ")
+        .replace("–", "-")
+    )
+
+    # Expand common contractions for clearer pronunciation.
+    contractions = {
+        "isn't": "is not",
+        "aren't": "are not",
+        "wasn't": "was not",
+        "weren't": "were not",
+        "can't": "cannot",
+        "won't": "will not",
+        "don't": "do not",
+        "doesn't": "does not",
+        "didn't": "did not",
+        "haven't": "have not",
+        "hasn't": "has not",
+        "hadn't": "had not",
+        "i'm": "i am",
+        "i've": "i have",
+        "i'd": "i would",
+        "i'll": "i will",
+        "we're": "we are",
+        "we've": "we have",
+        "we'll": "we will",
+        "they're": "they are",
+        "they've": "they have",
+        "they'll": "they will",
+        "it's": "it is",
+        "there's": "there is",
+        "that's": "that is",
+        "what's": "what is",
+        "who's": "who is",
+        "could've": "could have",
+        "should've": "should have",
+        "would've": "would have",
+    }
+    for contraction, expansion in contractions.items():
+        text = re.sub(rf"(?i)\b{re.escape(contraction)}\b", expansion, text)
+
+    # Remove repeated punctuation that can trigger artifacts.
+    text = re.sub(r"\.{2,}", ".", text)
+    text = re.sub(r"!{2,}", "!", text)
+
     # Strip markdown bullets/asterisks so TTS doesn't read them aloud.
     text = re.sub(r"(^|\n)\s*[*+-]\s+", r"\1", text)
     text = text.replace("*", " ")

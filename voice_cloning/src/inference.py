@@ -16,12 +16,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import warnings
 from pathlib import Path
 from typing import Iterator
-import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -30,7 +28,6 @@ import librosa
 import torch
 import yaml
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.responses import StreamingResponse
@@ -106,7 +103,7 @@ DEFAULT_F0_SCALE = 1.0
 DEFAULT_LANG = "en-ca"
 DEFAULT_MAX_CHUNK_CHARS = 180
 DEFAULT_MAX_CHUNK_WORDS = 45
-DEFAULT_PAUSE_MS = 180
+DEFAULT_PAUSE_MS = 40
 
 _WORD_RE = re.compile(r"[A-Za-z']+|[^A-Za-z']+")
 _WORD_ONLY_RE = re.compile(r"[A-Za-z']+$")
@@ -444,13 +441,19 @@ def _stream_subprocess(command: list[str], cwd: Path) -> Iterator[str]:
     )
     assert process.stdout is not None
     for line in process.stdout:
-        yield line.rstrip()
+        yield f"{line.rstrip()}\n"
     exit_code = process.wait()
     if exit_code != 0:
-        yield f"[process exited {exit_code}]"
-        yield "ERROR: Subprocess failed. See logs above for details."
+        logger.error(
+            "component=backend op=subprocess_stream status=error exit_code=%s cwd=%s cmd=%s",
+            exit_code,
+            cwd,
+            command,
+        )
+        yield f"[process exited {exit_code}]\n"
+        yield "ERROR: Subprocess failed. See logs above for details.\n"
     else:
-        yield f"[process exited {exit_code}]"
+        yield f"[process exited {exit_code}]\n"
 
 
 def _resolve_path(base_dir: Path, value: str | None) -> Path | None:
@@ -700,7 +703,12 @@ def _load_profile_defaults(model_path: Path) -> dict:
         if candidate.exists():
             try:
                 data = json.loads(candidate.read_text())
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "component=backend op=load_profile_defaults fallback=empty_defaults reason=json_invalid path=%s error=%s",
+                    candidate,
+                    exc,
+                )
                 continue
             if isinstance(data, dict):
                 return data
@@ -710,7 +718,12 @@ def _load_profile_defaults(model_path: Path) -> dict:
 def _load_inference_defaults(config_path: Path) -> dict:
     try:
         data = yaml.safe_load(config_path.read_text())
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "component=backend op=load_inference_defaults fallback=empty_defaults reason=yaml_invalid path=%s error=%s",
+            config_path,
+            exc,
+        )
         return {}
     if not isinstance(data, dict):
         return {}
@@ -733,7 +746,14 @@ def _load_profile_defaults_for_speaker(
             if candidate.exists():
                 try:
                     data = json.loads(candidate.read_text())
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
+                    logger.warning(
+                        "component=backend op=load_profile_defaults fallback=empty_defaults reason=json_invalid path=%s profile=%s profile_type=%s error=%s",
+                        candidate,
+                        speaker,
+                        profile_type,
+                        exc,
+                    )
                     data = {}
                 if isinstance(data, dict):
                     return data
@@ -1645,6 +1665,7 @@ def _startup() -> None:
         warmup_text_normalizer()
         print("Text normalizer warmup completed.")
     except Exception as exc:
+        logger.exception("component=backend op=text_normalizer_warmup status=error")
         print(f"Text normalizer warmup failed: {exc}")
     default_model = os.getenv("STYLE_TTS2_MODEL")
     if default_model:
@@ -1713,8 +1734,6 @@ def preprocess(req: PreprocessRequest):
     if not profile:
         raise HTTPException(status_code=400, detail="profile is required")
     profile_type = req.profile_type or PROFILE_TYPE_VOICE
-    if profile_type == PROFILE_TYPE_AVATAR and not req.audio_filename:
-        raise HTTPException(status_code=400, detail="audio_filename is required for avatar preprocessing")
     raw_dir = raw_videos_dir(profile, profile_type)
     audio_dir = raw_audio_dir(profile, profile_type)
     filename = req.filename
@@ -1734,12 +1753,21 @@ def preprocess(req: PreprocessRequest):
         audio_path = audio_dir / req.audio_filename
         if not audio_path.exists():
             raise HTTPException(status_code=400, detail=f"audio file not found: {audio_path}")
+    elif profile_type == PROFILE_TYPE_AVATAR:
+        if not audio_dir.exists():
+            raise HTTPException(status_code=400, detail="audio_filename is required for avatar preprocessing")
+        candidates = sorted(audio_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not candidates:
+            raise HTTPException(status_code=400, detail="audio_filename is required for avatar preprocessing")
+        audio_path = candidates[0]
+        print(f"Auto-selected audio upload: {audio_path.name}", flush=True)
     preprocess_script = "preprocess.py"
     command = []
     if profile_type == PROFILE_TYPE_AVATAR:
         preprocess_script = "preprocess_video.py"
         command = [
             sys.executable,
+            "-u",
             str(PROJECT_ROOT / "src" / preprocess_script),
             "--video",
             str(video_path),
@@ -1774,6 +1802,7 @@ def preprocess(req: PreprocessRequest):
     else:
         command = [
             sys.executable,
+            "-u",
             str(PROJECT_ROOT / "src" / preprocess_script),
             "--video",
             str(video_path),
@@ -1798,6 +1827,7 @@ def train(req: TrainRequest):
         raise HTTPException(status_code=400, detail=f"dataset not found: {dataset_path}")
     command = [
         sys.executable,
+        "-u",
         str(PROJECT_ROOT / "src" / "train.py"),
         "--dataset_path",
         str(dataset_path),
@@ -1831,19 +1861,31 @@ def train(req: TrainRequest):
         )
         assert process.stdout is not None
         for line in process.stdout:
-            yield line.rstrip()
+            yield f"{line.rstrip()}\n"
         exit_code = process.wait()
         if exit_code != 0:
-            yield f"[process exited {exit_code}]"
-            yield "ERROR: Subprocess failed. See logs above for details."
+            logger.error(
+                "component=backend op=train_subprocess status=error exit_code=%s profile=%s profile_type=%s cmd=%s",
+                exit_code,
+                profile,
+                profile_type,
+                command,
+            )
+            yield f"[process exited {exit_code}]\n"
+            yield "ERROR: Subprocess failed. See logs above for details.\n"
             return
-        yield f"[process exited {exit_code}]"
-        yield "[warmup] starting..."
+        yield f"[process exited {exit_code}]\n"
+        yield "[warmup] starting...\n"
         try:
             _warmup_profile(profile, profile_type)
-            yield "[warmup] done"
+            yield "[warmup] done\n"
         except Exception as exc:
-            yield f"[warmup] failed: {exc}"
+            logger.exception(
+                "component=backend op=warmup_profile status=error profile=%s profile_type=%s",
+                profile,
+                profile_type,
+            )
+            yield f"[warmup] failed: {exc}\n"
 
     return StreamingResponse(_train_stream(), media_type="text/plain")
 
@@ -1914,7 +1956,7 @@ def stream(req: GenerateRequest):
 
     def _generator() -> Iterator[str]:
         for idx, chunk in enumerate(chunks):
-            ref_for_chunk = _pick_ref_for_chunk(chunk, profile_dir, ref_wav_path)
+            ref_for_chunk = ref_wav_path
             if pad_text:
                 chunk = f"{pad_text_token} {chunk} {pad_text_token}"
             audio = engine.generate(
@@ -2054,7 +2096,7 @@ def generate(req: GenerateRequest):
         if seed is None and len(chunks) > 1:
             seed = 1234
         for idx, chunk in enumerate(chunks):
-            ref_for_chunk = _pick_ref_for_chunk(chunk, profile_dir, ref_wav_path)
+            ref_for_chunk = ref_wav_path
             if pad_text:
                 chunk = f"{pad_text_token} {chunk} {pad_text_token}"
             audio = engine.generate(

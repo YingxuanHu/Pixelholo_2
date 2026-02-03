@@ -1,10 +1,12 @@
+import logging
 import os
 from typing import Generator, List, Dict
 
 from dotenv import load_dotenv
 from groq import Groq
 
-from src.utils.smart_buffer import SmartStreamBuffer
+
+logger = logging.getLogger("pixelholo.llm")
 
 class LLMService:
     def __init__(self, system_prompt: str = "You are a helpful, concise AI assistant."):
@@ -22,6 +24,7 @@ class LLMService:
         user_input: str,
         min_words: int = 8,
         min_chars: int = 40,
+        max_chars: int = 180,
     ) -> Generator[str, None, None]:
         """
         Sends text to Groq (Llama 3) and yields COMPLETE SENTENCES as they are generated.
@@ -36,12 +39,16 @@ class LLMService:
                 temperature=0.7,
             )
         except Exception as e:
+            logger.exception(
+                "component=llm op=groq_chat status=error input_chars=%s",
+                len(user_input),
+            )
             yield f"Error calling Groq: {str(e)}"
             return
 
         full_response_text = ""
+        buffer = ""
         min_chunk_size = max(min_chars, min_words * 2)
-        smart_buffer = SmartStreamBuffer(min_chunk_size=min_chunk_size, max_chunk_size=150)
 
         print("🧠 Llama 3 Thinking...", end="", flush=True)
 
@@ -49,14 +56,27 @@ class LLMService:
             if chunk.choices[0].delta.content:
                 token = chunk.choices[0].delta.content
                 full_response_text += token
+                buffer += token
 
-                chunk = smart_buffer.add_token(token)
-                if chunk:
-                    yield chunk
+                # Split only on strong punctuation once we have enough context.
+                if any(punct in token for punct in (".", "?", "!", "\n")):
+                    if len(buffer) >= min_chunk_size:
+                        yield buffer.strip()
+                        buffer = ""
+                        continue
 
-        tail = smart_buffer.flush()
-        if tail:
-            yield tail
+                # Emergency split if buffer gets too long (avoid latency spikes).
+                if len(buffer) >= max_chars:
+                    last_space = buffer.rfind(" ")
+                    if last_space != -1:
+                        head = buffer[:last_space].strip()
+                        tail = buffer[last_space:].strip()
+                        if head:
+                            yield head
+                        buffer = tail
+
+        if buffer.strip():
+            yield buffer.strip()
 
         self.history.append({"role": "assistant", "content": full_response_text})
         print(" Done.")
