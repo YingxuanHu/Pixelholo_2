@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useSpeechToText } from '../hooks/useSpeechToText';
 import { useMobileVoiceInput } from '../mobile/useMobileVoiceInput';
 
@@ -25,8 +25,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   const [text, setText] = useState('');
   const [chatText, setChatText] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [captureError, setCaptureError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isDisabled = !!disabled;
   const isSecureLikeContext =
     typeof window !== 'undefined' &&
@@ -68,7 +66,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     error: mobileVoiceError,
     startRecording: startMobileRecording,
     stopRecording: stopMobileRecording,
-    transcribeFile,
     clearError: clearMobileVoiceError,
   } = useMobileVoiceInput({
     apiBase,
@@ -76,8 +73,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   });
   const canUseNativeSpeech = hasSupport && isSecureLikeContext;
   const canUseMobileRecorder = !canUseNativeSpeech && hasRecorderSupport && isSecureLikeContext && Boolean(apiBase);
-  const canUseCaptureFallback = !canUseNativeSpeech && Boolean(apiBase);
-  const canUseAnyVoiceInput = canUseNativeSpeech || canUseMobileRecorder || canUseCaptureFallback;
+  const canUseAnyVoiceInput = canUseNativeSpeech || canUseMobileRecorder;
   const isVoiceListening = canUseNativeSpeech ? isListening : isMobileRecording;
   const voiceButtonLabel = isMobileTranscribing
     ? 'Transcribing…'
@@ -87,7 +83,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
 
   const handleVoiceInput = useCallback(async () => {
     if (isDisabled || mode !== 'chat') return;
-    setCaptureError(null);
     clearMobileVoiceError();
     if (onInterrupt) {
       await onInterrupt();
@@ -102,23 +97,15 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
       return;
     }
 
-    if (canUseMobileRecorder) {
-      if (isMobileRecording) {
-        stopMobileRecording();
-        return;
-      }
-      await startMobileRecording();
+    if (!canUseMobileRecorder) {
       return;
     }
-
-    if (canUseCaptureFallback) {
-      fileInputRef.current?.click();
+    if (isMobileRecording) {
+      stopMobileRecording();
       return;
     }
-
-    setCaptureError('Voice input is unavailable in this browser/context.');
+    await startMobileRecording();
   }, [
-    canUseCaptureFallback,
     canUseMobileRecorder,
     canUseNativeSpeech,
     clearMobileVoiceError,
@@ -181,26 +168,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         <span>{mode === 'chat' ? chatText.length : text.length} chars</span>
         <div className="flex items-center gap-2">
           {mode === 'chat' && (
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="audio/*"
-              capture="user"
-              className="hidden"
-              onChange={async (e) => {
-                const file = e.target.files?.[0] || null;
-                if (!file) {
-                  e.currentTarget.value = '';
-                  return;
-                }
-                setCaptureError(null);
-                clearMobileVoiceError();
-                await transcribeFile(file);
-                e.currentTarget.value = '';
-              }}
-            />
-          )}
-          {mode === 'chat' && (
             <button
               onClick={handleVoiceInput}
               disabled={isDisabled || isMobileTranscribing || !canUseAnyVoiceInput}
@@ -223,16 +190,13 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
 
       {mode === 'chat' && !canUseNativeSpeech && !isSecureLikeContext && (
         <p className="mt-2 text-[11px] text-slate-500">
-          iOS live mic capture needs HTTPS. Voice Input will open the recorder fallback on this connection.
+          iOS live mic capture needs HTTPS. Open the app over HTTPS to get the microphone permission prompt.
         </p>
       )}
       {mode === 'chat' && !canUseAnyVoiceInput && (
         <p className="mt-2 text-[11px] text-slate-500">
           Voice input is unavailable in this browser/context. Use HTTPS and allow microphone access on iOS.
         </p>
-      )}
-      {captureError && (
-        <p className="mt-2 text-[11px] text-rose-400">{captureError}</p>
       )}
       {mobileVoiceError && (
         <p className="mt-2 text-[11px] text-rose-400">{mobileVoiceError}</p>

@@ -133,23 +133,6 @@ export const useMobileVoiceInput = ({ apiBase, onFinalText, language = 'en' }: M
     await onFinalText(spoken);
   }, [apiBase, language, onFinalText]);
 
-  const transcribeFile = useCallback(async (file: File | null) => {
-    if (!file) return;
-    if (!apiBase) {
-      setError('API base URL is missing.');
-      return;
-    }
-    setError(null);
-    setIsTranscribing(true);
-    try {
-      await transcribeBlob(file);
-    } catch (err) {
-      setError(toErrorMessage(err));
-    } finally {
-      setIsTranscribing(false);
-    }
-  }, [apiBase, transcribeBlob]);
-
   const startRecording = useCallback(async () => {
     if (isRecording || isTranscribing) return;
     if (!apiBase) {
@@ -157,11 +140,7 @@ export const useMobileVoiceInput = ({ apiBase, onFinalText, language = 'en' }: M
       return;
     }
     if (!hasRecorderSupport) {
-      setError('Live microphone capture is unavailable on this iOS browser. Using recorder fallback.');
-      return;
-    }
-    if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-      setError('Live microphone capture on iOS requires HTTPS.');
+      setError('Live microphone capture is unavailable in this browser.');
       return;
     }
 
@@ -281,7 +260,6 @@ export const useMobileVoiceInput = ({ apiBase, onFinalText, language = 'en' }: M
     error,
     startRecording,
     stopRecording,
-    transcribeFile,
     clearError,
   };
 };
