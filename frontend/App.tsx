@@ -922,9 +922,9 @@ const App: React.FC = () => {
     if (!profile.name || !text) return;
     setUiNotice(null);
     await unlockAudio();
-    if (audioContextRef.current?.state !== 'running') {
-      setUiNotice('Safari blocked audio. Click again to enable sound.');
-      return;
+    const audioRunning = audioContextRef.current?.state === 'running';
+    if (!audioRunning) {
+      preferElementAudioRef.current = true;
     }
     await warmupProfile(profile.name);
     // End any existing stream immediately.
@@ -935,9 +935,13 @@ const App: React.FC = () => {
     setInferenceChunks([]);
     setLatency(null);
     setInferenceStageIndex(inferenceSteps.length > 0 ? 0 : null);
-    nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
+    nextStartTimeRef.current = audioContextRef.current?.currentTime || performance.now() / 1000;
     audioEndTimeRef.current = nextStartTimeRef.current;
     fallbackNoticeShownRef.current = false;
+    if (!audioRunning) {
+      setUiNotice('iOS audio compatibility mode enabled.');
+      fallbackNoticeShownRef.current = true;
+    }
     audioStartDelayRef.current = outputMode === 'avatar' ? 0.35 : 0.05;
     let sawError = false;
 

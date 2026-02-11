@@ -1,5 +1,6 @@
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import { useSpeechToText } from '../hooks/useSpeechToText';
+import { useMobileVoiceInput } from '../mobile/useMobileVoiceInput';
 
 type Mode = 'chat' | 'tts';
 
@@ -24,9 +25,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   const [text, setText] = useState('');
   const [chatText, setChatText] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
-  const [transcribeError, setTranscribeError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isDisabled = !!disabled;
   const isSecureLikeContext =
     typeof window !== 'undefined' &&
@@ -60,52 +58,65 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     [handleSend],
   );
 
-  const { isListening, startListening, hasSupport, transcript } = useSpeechToText(onSpeechResult);
+  const { isListening, startListening, stopListening, hasSupport, transcript } = useSpeechToText(onSpeechResult);
+  const {
+    hasSupport: hasMobileVoiceSupport,
+    isRecording: isMobileRecording,
+    isTranscribing: isMobileTranscribing,
+    error: mobileVoiceError,
+    startRecording: startMobileRecording,
+    stopRecording: stopMobileRecording,
+    clearError: clearMobileVoiceError,
+  } = useMobileVoiceInput({
+    apiBase,
+    onFinalText: onSpeechResult,
+  });
   const canUseNativeSpeech = hasSupport && isSecureLikeContext;
+  const canUseMobileVoice = !canUseNativeSpeech && hasMobileVoiceSupport && isSecureLikeContext && Boolean(apiBase);
+  const canUseAnyVoiceInput = canUseNativeSpeech || canUseMobileVoice;
+  const isVoiceListening = canUseNativeSpeech ? isListening : isMobileRecording;
+  const voiceButtonLabel = isMobileTranscribing
+    ? 'Transcribing…'
+    : isVoiceListening
+      ? 'Listening…'
+      : 'Voice Input';
 
-  const startListeningSafe = useCallback(async () => {
+  const handleVoiceInput = useCallback(async () => {
+    if (isDisabled || mode !== 'chat') return;
+    clearMobileVoiceError();
     if (onInterrupt) {
       await onInterrupt();
     }
-    startListening();
-  }, [onInterrupt, startListening]);
 
-  const openRecorder = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
-
-  const handleRecordedAudio = useCallback(
-    async (file: File | null) => {
-      if (!file || !apiBase) return;
-      setTranscribeError(null);
-      setIsTranscribing(true);
-      try {
-        const form = new FormData();
-        form.append('file', file);
-        form.append('language', 'en');
-
-        const res = await fetch(`${apiBase}/transcribe_audio`, {
-          method: 'POST',
-          body: form,
-        });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-        const data = await res.json();
-        const spoken = String(data.text || '').trim();
-        if (!spoken) {
-          throw new Error('No speech detected.');
-        }
-        setChatText(spoken);
-        await handleSend('chat', spoken);
-      } catch (err) {
-        setTranscribeError(err instanceof Error ? err.message : 'Transcription failed');
-      } finally {
-        setIsTranscribing(false);
+    if (canUseNativeSpeech) {
+      if (isListening) {
+        stopListening();
+      } else {
+        startListening();
       }
-    },
-    [apiBase, handleSend],
-  );
+      return;
+    }
+
+    if (!canUseMobileVoice) return;
+    if (isMobileRecording) {
+      stopMobileRecording();
+      return;
+    }
+    await startMobileRecording();
+  }, [
+    canUseMobileVoice,
+    canUseNativeSpeech,
+    clearMobileVoiceError,
+    isDisabled,
+    isListening,
+    isMobileRecording,
+    mode,
+    onInterrupt,
+    startListening,
+    startMobileRecording,
+    stopListening,
+    stopMobileRecording,
+  ]);
 
   const containerClass =
     variant === 'embedded'
@@ -154,39 +165,16 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
       <div className="mt-3 flex items-center justify-between text-xs text-slate-400 gap-2">
         <span>{mode === 'chat' ? chatText.length : text.length} chars</span>
         <div className="flex items-center gap-2">
-          {mode === 'chat' && canUseNativeSpeech && (
+          {mode === 'chat' && (
             <button
-              onClick={startListeningSafe}
-              disabled={isDisabled}
+              onClick={handleVoiceInput}
+              disabled={isDisabled || isMobileTranscribing || !canUseAnyVoiceInput}
               className={`rounded-lg px-3 py-2 text-xs font-bold ${
-                isListening ? 'bg-rose-500 text-white' : 'bg-slate-800 text-slate-200'
+                isVoiceListening ? 'bg-rose-500 text-white' : 'bg-slate-800 text-slate-200'
               }`}
             >
-              {isListening ? 'Listening…' : 'Voice Input'}
+              {voiceButtonLabel}
             </button>
-          )}
-          {mode === 'chat' && !canUseNativeSpeech && apiBase && (
-            <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="audio/*"
-                capture="user"
-                className="hidden"
-                onChange={async (e) => {
-                  const file = e.target.files?.[0] || null;
-                  await handleRecordedAudio(file);
-                  e.currentTarget.value = '';
-                }}
-              />
-              <button
-                onClick={openRecorder}
-                disabled={isDisabled || isTranscribing}
-                className="rounded-lg px-3 py-2 text-xs font-bold bg-slate-800 text-slate-200"
-              >
-                {isTranscribing ? 'Transcribing…' : 'Record Clip'}
-              </button>
-            </>
           )}
           <button
             onClick={() => handleSend(mode, mode === 'chat' ? chatText : text)}
@@ -198,13 +186,13 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         </div>
       </div>
 
-      {mode === 'chat' && !canUseNativeSpeech && (
+      {mode === 'chat' && !canUseAnyVoiceInput && (
         <p className="mt-2 text-[11px] text-slate-500">
-          Native browser speech recognition is unavailable on this device/context. Use <span className="font-semibold text-slate-300">Record Clip</span>.
+          Voice input is unavailable in this browser/context. Use HTTPS and allow microphone access on iOS.
         </p>
       )}
-      {transcribeError && (
-        <p className="mt-2 text-[11px] text-rose-400">{transcribeError}</p>
+      {mobileVoiceError && (
+        <p className="mt-2 text-[11px] text-rose-400">{mobileVoiceError}</p>
       )}
     </div>
   );

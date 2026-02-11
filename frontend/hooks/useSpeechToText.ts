@@ -64,10 +64,22 @@ export const useSpeechToText = (onFinalText: SpeechResultHandler) => {
     }
   };
 
+  const stopListening = () => {
+    if (!recognitionRef.current) return;
+    try {
+      recognitionRef.current.stop();
+    } catch {
+      // ignore duplicate stops
+    } finally {
+      setIsListening(false);
+    }
+  };
+
   return {
     isListening,
     transcript,
     startListening,
+    stopListening,
     hasSupport,
   };
 };
