@@ -59,13 +59,9 @@ uvicorn src.inference:app --host 0.0.0.0 --port 8000
 
 # Terminal 2 (frontend)
 cd /home/alvin/PixelHolo_trial/frontend
-npm run dev -- --host 0.0.0.0 --port 5173
+npm run dev
 ```
-Open on desktop: `http://localhost:5173`
-
-Open on iPhone (same network): `http://<vm-or-host-ip>:5173`
-
-The frontend defaults backend API to `http(s)://<current-host>:8000` so phone + desktop can use the same UI flow without code changes.
+Open http://localhost:5173
 
 Optional (LLM chat): create `/home/alvin/PixelHolo_trial/.env` with:
 ```
@@ -77,10 +73,8 @@ GROQ_API_KEY=your_key_here
 - Real-time lip sync with Wav2Lip.
 - Baked avatars for zero face-detect latency.
 - Staircase chunking for stable streaming.
-- Mobile-friendly web UI for iOS Safari.
 
 ## Troubleshooting
 - Permission errors: activate the correct `.venv` in each repo.
 - Audio but no video: confirm `lip_syncing/models/wav2lip_gan.pth` exists.
 - Stream stalling: ensure GPU VRAM headroom and stable network.
-- iPhone cannot connect: verify firewall/security group allows ports `5173` and `8000` from your LAN.
