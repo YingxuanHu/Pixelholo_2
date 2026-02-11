@@ -52,7 +52,7 @@ export const useMobileVoiceInput = ({ apiBase, onFinalText, language = 'en' }: M
   const lastVoiceAtRef = useRef<number>(0);
   const mimeTypeRef = useRef<string>('');
 
-  const hasSupport = useMemo(() => {
+  const hasRecorderSupport = useMemo(() => {
     if (typeof window === 'undefined') return false;
     return Boolean(window.MediaRecorder && navigator.mediaDevices?.getUserMedia);
   }, []);
@@ -133,8 +133,37 @@ export const useMobileVoiceInput = ({ apiBase, onFinalText, language = 'en' }: M
     await onFinalText(spoken);
   }, [apiBase, language, onFinalText]);
 
+  const transcribeFile = useCallback(async (file: File | null) => {
+    if (!file) return;
+    if (!apiBase) {
+      setError('API base URL is missing.');
+      return;
+    }
+    setError(null);
+    setIsTranscribing(true);
+    try {
+      await transcribeBlob(file);
+    } catch (err) {
+      setError(toErrorMessage(err));
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, [apiBase, transcribeBlob]);
+
   const startRecording = useCallback(async () => {
-    if (!hasSupport || !apiBase || isRecording || isTranscribing) return;
+    if (isRecording || isTranscribing) return;
+    if (!apiBase) {
+      setError('API base URL is missing.');
+      return;
+    }
+    if (!hasRecorderSupport) {
+      setError('Live microphone capture is unavailable on this iOS browser. Using recorder fallback.');
+      return;
+    }
+    if (!window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      setError('Live microphone capture on iOS requires HTTPS.');
+      return;
+    }
 
     setError(null);
     chunksRef.current = [];
@@ -235,7 +264,7 @@ export const useMobileVoiceInput = ({ apiBase, onFinalText, language = 'en' }: M
       setIsRecording(false);
       setError(toErrorMessage(err));
     }
-  }, [apiBase, cleanupAll, cleanupAnalyser, cleanupStream, hasSupport, isRecording, isTranscribing, stopRecording, transcribeBlob]);
+  }, [apiBase, cleanupAll, cleanupAnalyser, cleanupStream, hasRecorderSupport, isRecording, isTranscribing, stopRecording, transcribeBlob]);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -246,12 +275,13 @@ export const useMobileVoiceInput = ({ apiBase, onFinalText, language = 'en' }: M
   }, [cleanupAll]);
 
   return {
-    hasSupport,
+    hasRecorderSupport,
     isRecording,
     isTranscribing,
     error,
     startRecording,
     stopRecording,
+    transcribeFile,
     clearError,
   };
 };
