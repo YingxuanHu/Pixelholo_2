@@ -26,9 +26,6 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
   const [chatText, setChatText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const isDisabled = !!disabled;
-  const isSecureLikeContext =
-    typeof window !== 'undefined' &&
-    (window.isSecureContext || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
   const handleSend = useCallback(
     async (selectedMode: Mode, inputText: string) => {
@@ -71,8 +68,8 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
     apiBase,
     onFinalText: onSpeechResult,
   });
-  const canUseNativeSpeech = hasSupport && isSecureLikeContext;
-  const canUseMobileRecorder = !canUseNativeSpeech && hasRecorderSupport && isSecureLikeContext && Boolean(apiBase);
+  const canUseNativeSpeech = hasSupport;
+  const canUseMobileRecorder = !canUseNativeSpeech && hasRecorderSupport && Boolean(apiBase);
   const canUseAnyVoiceInput = canUseNativeSpeech || canUseMobileRecorder;
   const isVoiceListening = canUseNativeSpeech ? isListening : isMobileRecording;
   const voiceButtonLabel = isMobileTranscribing
@@ -188,14 +185,9 @@ const ControlPanel: React.FC<ControlPanelProps> = ({
         </div>
       </div>
 
-      {mode === 'chat' && !canUseNativeSpeech && !isSecureLikeContext && (
-        <p className="mt-2 text-[11px] text-slate-500">
-          iOS live mic capture needs HTTPS. Open the app over HTTPS to get the microphone permission prompt.
-        </p>
-      )}
       {mode === 'chat' && !canUseAnyVoiceInput && (
         <p className="mt-2 text-[11px] text-slate-500">
-          Voice input is unavailable in this browser/context. Use HTTPS and allow microphone access on iOS.
+          Voice input is unavailable in this browser/context.
         </p>
       )}
       {mobileVoiceError && (
