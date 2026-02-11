@@ -1,0 +1,9 @@
+{
+  "name": "PixelHolo Voice Studio",
+  "short_name": "PixelHolo",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FDFCF8",
+  "theme_color": "#0D9488",
+  "orientation": "portrait"
+}

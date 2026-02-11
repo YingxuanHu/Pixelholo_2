@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { useSpeechToText } from '../hooks/useSpeechToText';
 
 type Mode = 'chat' | 'tts';
@@ -9,14 +9,28 @@ type ControlPanelProps = {
   onInterrupt?: () => Promise<void> | void;
   disabled?: boolean;
   variant?: 'card' | 'embedded';
+  apiBase?: string;
 };
 
-const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, onInterrupt, disabled, variant = 'card' }) => {
+const ControlPanel: React.FC<ControlPanelProps> = ({
+  onSendChat,
+  onSendDirect,
+  onInterrupt,
+  disabled,
+  variant = 'card',
+  apiBase = '',
+}) => {
   const [mode, setMode] = useState<Mode>('tts');
   const [text, setText] = useState('');
   const [chatText, setChatText] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isDisabled = !!disabled;
+  const isSecureLikeContext =
+    typeof window !== 'undefined' &&
+    (window.isSecureContext || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
   const handleSend = useCallback(
     async (selectedMode: Mode, inputText: string) => {
@@ -47,12 +61,51 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, o
   );
 
   const { isListening, startListening, hasSupport, transcript } = useSpeechToText(onSpeechResult);
+  const canUseNativeSpeech = hasSupport && isSecureLikeContext;
+
   const startListeningSafe = useCallback(async () => {
     if (onInterrupt) {
       await onInterrupt();
     }
     startListening();
   }, [onInterrupt, startListening]);
+
+  const openRecorder = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleRecordedAudio = useCallback(
+    async (file: File | null) => {
+      if (!file || !apiBase) return;
+      setTranscribeError(null);
+      setIsTranscribing(true);
+      try {
+        const form = new FormData();
+        form.append('file', file);
+        form.append('language', 'en');
+
+        const res = await fetch(`${apiBase}/transcribe_audio`, {
+          method: 'POST',
+          body: form,
+        });
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
+        const data = await res.json();
+        const spoken = String(data.text || '').trim();
+        if (!spoken) {
+          throw new Error('No speech detected.');
+        }
+        setChatText(spoken);
+        await handleSend('chat', spoken);
+      } catch (err) {
+        setTranscribeError(err instanceof Error ? err.message : 'Transcription failed');
+      } finally {
+        setIsTranscribing(false);
+      }
+    },
+    [apiBase, handleSend],
+  );
 
   const containerClass =
     variant === 'embedded'
@@ -98,10 +151,10 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, o
         }}
       />
 
-      <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
+      <div className="mt-3 flex items-center justify-between text-xs text-slate-400 gap-2">
         <span>{mode === 'chat' ? chatText.length : text.length} chars</span>
         <div className="flex items-center gap-2">
-          {mode === 'chat' && hasSupport && (
+          {mode === 'chat' && canUseNativeSpeech && (
             <button
               onClick={startListeningSafe}
               disabled={isDisabled}
@@ -112,6 +165,29 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, o
               {isListening ? 'Listening…' : 'Voice Input'}
             </button>
           )}
+          {mode === 'chat' && !canUseNativeSpeech && apiBase && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="audio/*"
+                capture="user"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0] || null;
+                  await handleRecordedAudio(file);
+                  e.currentTarget.value = '';
+                }}
+              />
+              <button
+                onClick={openRecorder}
+                disabled={isDisabled || isTranscribing}
+                className="rounded-lg px-3 py-2 text-xs font-bold bg-slate-800 text-slate-200"
+              >
+                {isTranscribing ? 'Transcribing…' : 'Record Clip'}
+              </button>
+            </>
+          )}
           <button
             onClick={() => handleSend(mode, mode === 'chat' ? chatText : text)}
             disabled={isDisabled}
@@ -121,6 +197,15 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onSendChat, onSendDirect, o
           </button>
         </div>
       </div>
+
+      {mode === 'chat' && !canUseNativeSpeech && (
+        <p className="mt-2 text-[11px] text-slate-500">
+          Native browser speech recognition is unavailable on this device/context. Use <span className="font-semibold text-slate-300">Record Clip</span>.
+        </p>
+      )}
+      {transcribeError && (
+        <p className="mt-2 text-[11px] text-rose-400">{transcribeError}</p>
+      )}
     </div>
   );
 };

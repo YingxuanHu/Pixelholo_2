@@ -5,12 +5,17 @@ type SpeechResultHandler = (text: string) => void;
 export const useSpeechToText = (onFinalText: SpeechResultHandler) => {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
+  const [hasSupport, setHasSupport] = useState(false);
   const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+    if (!SpeechRecognition) {
+      setHasSupport(false);
+      recognitionRef.current = null;
+      return;
+    }
 
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
@@ -35,6 +40,17 @@ export const useSpeechToText = (onFinalText: SpeechResultHandler) => {
     };
 
     recognitionRef.current = recognition;
+    setHasSupport(true);
+
+    return () => {
+      try {
+        recognition.stop();
+      } catch {
+        // ignore cleanup errors
+      }
+      recognitionRef.current = null;
+      setHasSupport(false);
+    };
   }, [onFinalText]);
 
   const startListening = () => {
@@ -52,6 +68,6 @@ export const useSpeechToText = (onFinalText: SpeechResultHandler) => {
     isListening,
     transcript,
     startListening,
-    hasSupport: Boolean(recognitionRef.current),
+    hasSupport,
   };
 };

@@ -4,8 +4,15 @@
   color-scheme: light;
 }
 
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
 body {
   font-family: 'Space Grotesk', sans-serif;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 h1, h2, h3, h4 {
@@ -37,4 +44,13 @@ h1, h2, h3, h4 {
 
 .animate-bounce-short {
   animation: bounce-short 2s ease-in-out infinite;
+}
+
+@media (max-width: 768px) {
+  input,
+  textarea,
+  select,
+  button {
+    font-size: 16px;
+  }
 }

@@ -46,6 +46,31 @@ SILENCE_RMS_THRESHOLD = 0.003
 _AI_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 _llm_service: LLMService | None = None
+_stt_lock = threading.Lock()
+_stt_model = None
+
+
+def _get_stt_model():
+    global _stt_model
+    with _stt_lock:
+        if _stt_model is None:
+            try:
+                from faster_whisper import WhisperModel
+            except Exception as exc:
+                raise RuntimeError(
+                    "Missing faster-whisper dependency for /transcribe_audio endpoint."
+                ) from exc
+            model_name = os.getenv("PIXELHOLO_STT_MODEL", "small")
+            if torch.cuda.is_available():
+                default_device = "cuda"
+                default_compute = "float16"
+            else:
+                default_device = "cpu"
+                default_compute = "int8"
+            device = os.getenv("PIXELHOLO_STT_DEVICE", default_device)
+            compute_type = os.getenv("PIXELHOLO_STT_COMPUTE", default_compute)
+            _stt_model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    return _stt_model
 
 
 def _get_llm_service() -> LLMService:
@@ -1775,6 +1800,48 @@ def upload_audio(
     with dest_path.open("wb") as handle:
         shutil.copyfileobj(file.file, handle)
     return {"saved_path": str(dest_path), "filename": filename}
+
+
+@app.post("/transcribe_audio")
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="file is required")
+
+    suffix = Path(file.filename).suffix or ".wav"
+    tmp_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = Path(tmp.name)
+            shutil.copyfileobj(file.file, tmp)
+
+        model = _get_stt_model()
+        lang = language.strip() if language else ""
+        transcribe_kwargs = {
+            "vad_filter": True,
+            "beam_size": 1,
+        }
+        if lang and lang.lower() != "auto":
+            transcribe_kwargs["language"] = lang
+
+        segments, info = model.transcribe(str(tmp_path), **transcribe_kwargs)
+        parts = [seg.text.strip() for seg in segments if getattr(seg, "text", None)]
+        text = re.sub(r"\s+", " ", " ".join(parts)).strip()
+
+        return {
+            "text": text,
+            "language": getattr(info, "language", None),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
+    finally:
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 @app.post("/preprocess")

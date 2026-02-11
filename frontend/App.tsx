@@ -3,6 +3,9 @@ import ControlPanel from './components/ControlPanel';
 import Header from './components/Header';
 import StepCard from './components/StepCard';
 import LogPanel from './components/LogPanel';
+import StepNavigator from './components/StepNavigator';
+import StepActions from './components/StepActions';
+import { getDefaultApiBase, normalizeApiBase } from './mobile/network';
 import {
   Profile,
   StepStatus,
@@ -26,7 +29,9 @@ type TrainParams = {
   maxLen: number;
 };
 
-const DEFAULT_API_BASE = 'http://127.0.0.1:8000';
+type ProfileType = 'voice' | 'avatar';
+
+const DEFAULT_API_BASE = getDefaultApiBase();
 const LOCAL_STORAGE_API_BASE_KEY = 'voxclone_api_base';
 const DEFAULT_PROFILE_TYPE: 'voice' | 'avatar' = 'voice';
 const DEFAULT_OUTPUT_MODE: 'voice' | 'avatar' = 'voice';
@@ -35,6 +40,7 @@ const BLUR_KERNEL_BY_LEVEL = { low: 60, medium: 75, high: 90 } as const;
 const DEFAULT_AVATAR_BLUR_LEVEL: keyof typeof BLUR_KERNEL_BY_LEVEL = 'medium';
 const DEFAULT_VIDEO_FPS = 25;
 const DEFAULT_AUDIO_START_DELAY_SEC = 0.05;
+
 const formatBytes = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return '0 MB';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -79,6 +85,16 @@ const defaultTrainParams: TrainParams = {
 };
 
 const trainPreset: TrainParams = { batchSize: 2, epochs: 15, maxLen: 400 };
+
+const isIOSLike = () => {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+  const ua = navigator.userAgent || '';
+  const iOS = /iPad|iPhone|iPod/.test(ua);
+  const iPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  return iOS || iPadOS;
+};
 
 const App: React.FC = () => {
   const [activeStep, setActiveStep] = useState(1);
@@ -145,6 +161,11 @@ const App: React.FC = () => {
   const audioStartDelayRef = useRef<number>(DEFAULT_AUDIO_START_DELAY_SEC);
   const videoFpsRef = useRef<number>(DEFAULT_VIDEO_FPS);
   const frameQueueRef = useRef<{ img: string; t: number }[]>([]);
+  const preferElementAudioRef = useRef<boolean>(isIOSLike());
+  const fallbackNoticeShownRef = useRef<boolean>(false);
+  const htmlAudioRef = useRef<HTMLAudioElement | null>(null);
+  const htmlAudioCurrentUrlRef = useRef<string | null>(null);
+  const htmlAudioQueueRef = useRef<string[]>([]);
 
   useEffect(() => {
     setTrainParams(trainPreset);
@@ -180,7 +201,9 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const cached = localStorage.getItem(LOCAL_STORAGE_API_BASE_KEY);
-    if (cached) setApiBase(cached);
+    if (cached) {
+      setApiBase(normalizeApiBase(cached));
+    }
   }, []);
 
   useEffect(() => {
@@ -194,8 +217,12 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(LOCAL_STORAGE_API_BASE_KEY, apiBase);
+    localStorage.setItem(LOCAL_STORAGE_API_BASE_KEY, normalizeApiBase(apiBase));
   }, [apiBase]);
+
+  const handleApiBaseChange = useCallback((value: string) => {
+    setApiBase(normalizeApiBase(value));
+  }, []);
 
   useEffect(() => {
     if (profileType === 'voice') {
@@ -346,7 +373,10 @@ const App: React.FC = () => {
     warmupProfile(profile.name);
   }, [apiStatus, hasTrainedProfile, profile.name, warmupProfile]);
 
-  const streamResponseLines = async (response: Response, onLine: (line: string) => void) => {
+  const streamResponseLines = async (
+    response: Response,
+    onLine: (line: string) => void | Promise<void>,
+  ) => {
     if (!response.body) return;
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -359,12 +389,12 @@ const App: React.FC = () => {
       while (index !== -1) {
         const line = buffer.slice(0, index).trim();
         buffer = buffer.slice(index + 1);
-        if (line) onLine(line);
+        if (line) await onLine(line);
         index = buffer.indexOf('\n');
       }
     }
     if (buffer.trim()) {
-      onLine(buffer.trim());
+      await onLine(buffer.trim());
     }
   };
 
@@ -664,6 +694,21 @@ const App: React.FC = () => {
       } catch {}
     }
     activeSourcesRef.current.clear();
+    if (htmlAudioRef.current) {
+      try {
+        htmlAudioRef.current.pause();
+      } catch {}
+      htmlAudioRef.current.removeAttribute('src');
+      htmlAudioRef.current.load();
+    }
+    if (htmlAudioCurrentUrlRef.current) {
+      URL.revokeObjectURL(htmlAudioCurrentUrlRef.current);
+      htmlAudioCurrentUrlRef.current = null;
+    }
+    for (const url of htmlAudioQueueRef.current) {
+      URL.revokeObjectURL(url);
+    }
+    htmlAudioQueueRef.current = [];
     nextStartTimeRef.current = 0;
     audioEndTimeRef.current = 0;
   };
@@ -761,6 +806,79 @@ const App: React.FC = () => {
     startVideoLoop();
   }, [startVideoLoop, videoState]);
 
+  const estimateWavDuration = useCallback((bytes: Uint8Array, fallbackSampleRate?: number) => {
+    if (bytes.byteLength < 44) return 0;
+    try {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const channels = view.getUint16(22, true) || 1;
+      const sampleRate = view.getUint32(24, true) || fallbackSampleRate || 24000;
+      const bitsPerSample = view.getUint16(34, true) || 16;
+      const dataSize = view.getUint32(40, true) || Math.max(0, bytes.byteLength - 44);
+      const bytesPerSecond = sampleRate * channels * (bitsPerSample / 8);
+      if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+        return 0;
+      }
+      return dataSize / bytesPerSecond;
+    } catch {
+      return 0;
+    }
+  }, []);
+
+  const playNextHtmlAudio = useCallback(async () => {
+    const audio = htmlAudioRef.current;
+    if (!audio) return;
+
+    if (htmlAudioCurrentUrlRef.current) {
+      URL.revokeObjectURL(htmlAudioCurrentUrlRef.current);
+      htmlAudioCurrentUrlRef.current = null;
+    }
+
+    const nextUrl = htmlAudioQueueRef.current.shift();
+    if (!nextUrl) {
+      audio.removeAttribute('src');
+      audio.load();
+      return;
+    }
+
+    htmlAudioCurrentUrlRef.current = nextUrl;
+    audio.src = nextUrl;
+    try {
+      await audio.play();
+    } catch {
+      if (!fallbackNoticeShownRef.current) {
+        setUiNotice('Tap once to enable iOS audio playback, then try again.');
+        fallbackNoticeShownRef.current = true;
+      }
+      await playNextHtmlAudio();
+    }
+  }, []);
+
+  const ensureHtmlAudioElement = useCallback(() => {
+    if (htmlAudioRef.current) {
+      return htmlAudioRef.current;
+    }
+    const audio = new Audio();
+    audio.preload = 'auto';
+    audio.setAttribute('playsinline', 'true');
+    audio.addEventListener('ended', () => {
+      void playNextHtmlAudio();
+    });
+    audio.addEventListener('error', () => {
+      void playNextHtmlAudio();
+    });
+    htmlAudioRef.current = audio;
+    return audio;
+  }, [playNextHtmlAudio]);
+
+  const enqueueHtmlAudio = useCallback((bytes: Uint8Array) => {
+    const audio = ensureHtmlAudioElement();
+    const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+    htmlAudioQueueRef.current.push(url);
+    if (!htmlAudioCurrentUrlRef.current && audio.paused) {
+      void playNextHtmlAudio();
+    }
+  }, [ensureHtmlAudioElement, playNextHtmlAudio]);
+
   const scheduleBuffer = (buffer: AudioBuffer) => {
     if (!audioContextRef.current) return;
     const ctx = audioContextRef.current;
@@ -819,6 +937,7 @@ const App: React.FC = () => {
     setInferenceStageIndex(inferenceSteps.length > 0 ? 0 : null);
     nextStartTimeRef.current = audioContextRef.current?.currentTime || 0;
     audioEndTimeRef.current = nextStartTimeRef.current;
+    fallbackNoticeShownRef.current = false;
     audioStartDelayRef.current = outputMode === 'avatar' ? 0.35 : 0.05;
     let sawError = false;
 
@@ -889,21 +1008,64 @@ const App: React.FC = () => {
         for (let i = 0; i < binary.length; i += 1) {
           bytes[i] = binary.charCodeAt(i);
         }
-        const buffer = await audioContextRef.current!.decodeAudioData(bytes.buffer);
-        const schedule = scheduleBuffer(buffer);
+        let duration =
+          typeof data.duration_sec === 'number' && data.duration_sec > 0
+            ? data.duration_sec
+            : estimateWavDuration(bytes, data.sample_rate);
+        let schedule: { startAt: number; endAt: number } | undefined;
+
+        if (preferElementAudioRef.current) {
+          enqueueHtmlAudio(bytes);
+          const now = audioContextRef.current?.currentTime || performance.now() / 1000;
+          const startAt = Math.max(now + 0.05, nextStartTimeRef.current);
+          const safeDuration = Math.max(duration || 0.05, 0.05);
+          const endAt = startAt + safeDuration;
+          nextStartTimeRef.current = endAt;
+          audioEndTimeRef.current = Math.max(audioEndTimeRef.current, endAt);
+          schedule = { startAt, endAt };
+          duration = safeDuration;
+        } else {
+          try {
+            const arr = bytes.buffer.slice(
+              bytes.byteOffset,
+              bytes.byteOffset + bytes.byteLength,
+            ) as ArrayBuffer;
+            const buffer = await audioContextRef.current!.decodeAudioData(arr);
+            duration = buffer.duration || duration;
+            schedule = scheduleBuffer(buffer);
+          } catch {
+            preferElementAudioRef.current = true;
+            enqueueHtmlAudio(bytes);
+            const now = audioContextRef.current?.currentTime || performance.now() / 1000;
+            const startAt = Math.max(now + 0.05, nextStartTimeRef.current);
+            const safeDuration = Math.max(duration || 0.05, 0.05);
+            const endAt = startAt + safeDuration;
+            nextStartTimeRef.current = endAt;
+            audioEndTimeRef.current = Math.max(audioEndTimeRef.current, endAt);
+            schedule = { startAt, endAt };
+            duration = safeDuration;
+            if (!fallbackNoticeShownRef.current) {
+              setUiNotice('iOS audio compatibility mode enabled.');
+              fallbackNoticeShownRef.current = true;
+            }
+          }
+        }
+
         if (outputMode === 'avatar' && schedule && videoStartTimeRef.current === null) {
           videoStartTimeRef.current = schedule.startAt;
           videoNextFrameTimeRef.current = schedule.startAt;
         }
         if (outputMode === 'avatar' && schedule && Array.isArray(data.frames_base64)) {
-          const duration = typeof data.duration_sec === 'number' ? data.duration_sec : buffer.duration;
           enqueueFrames(data.frames_base64, schedule.startAt, duration, data.fps);
           setInferenceStageIndex(Math.min(3, inferenceSteps.length - 1));
         }
         if (outputMode === 'voice') {
           setInferenceStageIndex(Math.min(4, inferenceSteps.length - 1));
         }
-        setInferenceChunks(prev => [...prev, { index: data.chunk_index, duration: buffer.duration, receivedAt: Date.now() }]);
+        setInferenceChunks(prev => [
+          ...prev,
+          { index: data.chunk_index, duration: duration || 0, receivedAt: Date.now() },
+        ]);
       });
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
@@ -911,7 +1073,20 @@ const App: React.FC = () => {
         setInferenceStageIndex(null);
       }
     }
-  }, [apiBase, enqueueFrames, modelOverride, outputMode, profile.name, profileType, refOverride, resetVideo, unlockAudio]);
+  }, [
+    apiBase,
+    enqueueFrames,
+    enqueueHtmlAudio,
+    ensureHtmlAudioElement,
+    estimateWavDuration,
+    modelOverride,
+    outputMode,
+    profile.name,
+    profileType,
+    refOverride,
+    resetVideo,
+    unlockAudio,
+  ]);
 
   const startInference = useCallback(async () => {
     await runInference(inferenceText, '/speak');
@@ -1037,38 +1212,43 @@ const App: React.FC = () => {
     </div>
   );
 
-  return (
-    <div className="min-h-screen pb-24 bg-[#FDFCF8]">
-      <Header profile={profile} apiBase={apiBase} apiStatus={apiStatus} onApiChange={setApiBase} />
+  const handleStepSelect = (step: number) => {
+    if (isBusy) {
+      setUiNotice('Stop the current job before changing steps.');
+      return;
+    }
+    if (canProceedTo(step)) {
+      setActiveStep(step);
+    }
+  };
 
-      <div className="max-w-7xl mx-auto px-6 pt-12">
-        <div className="flex items-center justify-between relative mb-12">
-          <div className="absolute top-1/2 left-0 w-full h-0.5 bg-slate-100 -translate-y-1/2 -z-10"></div>
-          {[1, 2, 3, 4].map((step) => (
-            <button
-              key={step}
-              onClick={() => {
-                if (isBusy) {
-                  setUiNotice('Stop the current job before changing steps.');
-                  return;
-                }
-                if (canProceedTo(step)) setActiveStep(step);
-              }}
-              disabled={isBusy || !canProceedTo(step)}
-              className={`
-                relative flex items-center justify-center w-12 h-12 rounded-full border-2 font-bold transition-all duration-300
-                ${activeStep === step ? 'bg-teal-600 text-white border-teal-600 scale-110 shadow-lg shadow-teal-600/20' :
-                  canProceedTo(step) && !isBusy ? 'bg-white text-teal-600 border-teal-600 cursor-pointer' : 'bg-slate-50 text-slate-300 border-slate-100 cursor-not-allowed'}
-              `}
-            >
-              {step}
-              <span className={`absolute -bottom-7 left-1/2 -translate-x-1/2 text-[10px] uppercase tracking-widest font-bold whitespace-nowrap
-                ${activeStep === step ? 'text-teal-600' : 'text-slate-400'}`}>
-                {step === 1 ? 'Profile' : step === 2 ? 'Preprocess' : step === 3 ? 'Training' : 'Generation'}
-              </span>
-            </button>
-          ))}
-        </div>
+  const goPrevStep = () => {
+    if (isBusy) {
+      setUiNotice('Stop the current job before changing steps.');
+      return;
+    }
+    setActiveStep((prev) => prev - 1);
+  };
+
+  const goNextStep = () => {
+    if (isBusy) {
+      setUiNotice('Stop the current job before changing steps.');
+      return;
+    }
+    setActiveStep((prev) => prev + 1);
+  };
+
+  return (
+    <div className="min-h-screen pb-44 md:pb-24 bg-[#FDFCF8]">
+      <Header profile={profile} apiBase={apiBase} apiStatus={apiStatus} onApiChange={handleApiBaseChange} />
+
+      <div className="max-w-7xl mx-auto px-4 md:px-6 pt-8 md:pt-12">
+        <StepNavigator
+          activeStep={activeStep}
+          isBusy={isBusy}
+          canProceedTo={canProceedTo}
+          onStepSelect={handleStepSelect}
+        />
 
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
           {activeStep === 1 && (
@@ -1631,7 +1811,7 @@ const App: React.FC = () => {
                         <span className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Avatar Preview</span>
                         <span className="text-[10px] font-bold text-teal-300">{outputMode === 'avatar' ? `${videoFps} FPS · ${videoQueue} queued` : 'disabled'}</span>
                       </div>
-                      <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[720px] w-full max-w-[640px] mx-auto">
+                      <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[52vh] md:min-h-[720px] w-full max-w-[640px] mx-auto">
                         <canvas ref={videoCanvasRef} width={640} height={853} className="w-full h-full" />
                       </div>
                       <div className="mt-3 text-[11px] text-slate-400 flex items-center justify-between">
@@ -1647,6 +1827,7 @@ const App: React.FC = () => {
                       <div className="mt-4">
                         <ControlPanel
                           variant="embedded"
+                          apiBase={apiBase}
                           onInterrupt={stopInference}
                           onSendChat={async (text) => runInference(text, '/chat')}
                           onSendDirect={async (text) => {
@@ -1660,7 +1841,7 @@ const App: React.FC = () => {
                 </div>
 
                 {latency && (
-                  <div className="grid grid-cols-2 gap-4 animate-in slide-in-from-top-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in slide-in-from-top-4">
                     <div className="bg-slate-900 p-6 rounded-2xl flex items-center justify-between">
                       <div>
                         <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Time to First Audio</p>
@@ -1704,40 +1885,13 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex gap-4">
-        {activeStep > 1 && (
-          <button
-            onClick={() => {
-              if (isBusy) {
-                setUiNotice('Stop the current job before changing steps.');
-                return;
-              }
-              setActiveStep(prev => prev - 1);
-            }}
-            disabled={isBusy}
-            className={`bg-white border-2 border-slate-100 text-slate-600 font-bold px-6 py-3 rounded-2xl shadow-xl hover:bg-slate-50 transition-all flex items-center gap-2 ${isBusy ? 'opacity-60 cursor-not-allowed' : ''}`}
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7" /></svg>
-            Previous
-          </button>
-        )}
-        {canProceedTo(activeStep + 1) && activeStep < 4 && (
-          <button
-            onClick={() => {
-              if (isBusy) {
-                setUiNotice('Stop the current job before changing steps.');
-                return;
-              }
-              setActiveStep(prev => prev + 1);
-            }}
-            disabled={isBusy}
-            className={`bg-teal-600 text-white font-bold px-8 py-3 rounded-2xl shadow-xl shadow-teal-600/20 hover:bg-teal-700 transition-all flex items-center gap-2 ${isBusy ? 'opacity-60 cursor-not-allowed' : 'animate-bounce-short'}`}
-          >
-            Next Stage
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7" /></svg>
-          </button>
-        )}
-      </div>
+      <StepActions
+        activeStep={activeStep}
+        isBusy={isBusy}
+        canProceedTo={canProceedTo}
+        onPrev={goPrevStep}
+        onNext={goNextStep}
+      />
     </div>
   );
 };
