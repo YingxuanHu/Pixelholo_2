@@ -45,14 +45,7 @@ SILENCE_RMS_THRESHOLD = 0.003
 
 _AI_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
-try:
-    from faster_whisper import WhisperModel
-except Exception:
-    WhisperModel = None  # type: ignore[assignment]
-
 _llm_service: LLMService | None = None
-_stt_lock = threading.Lock()
-_stt_model = None
 
 
 def _get_llm_service() -> LLMService:
@@ -62,32 +55,6 @@ def _get_llm_service() -> LLMService:
             system_prompt="You are a helpful, witty AI assistant. Keep answers concise."
         )
     return _llm_service
-
-
-def _get_stt_model():
-    global _stt_model
-    with _stt_lock:
-        if _stt_model is not None:
-            return _stt_model
-        if WhisperModel is None:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Missing faster-whisper dependency for /transcribe_audio endpoint."
-                    " Install with: pip install faster-whisper"
-                ),
-            )
-        model_name = os.getenv("PIXELHOLO_STT_MODEL", "small")
-        device = os.getenv("PIXELHOLO_STT_DEVICE", "auto")
-        compute_type = os.getenv("PIXELHOLO_STT_COMPUTE", "int8")
-        logger.info(
-            "component=stt op=load model=%s device=%s compute=%s",
-            model_name,
-            device,
-            compute_type,
-        )
-        _stt_model = WhisperModel(model_name, device=device, compute_type=compute_type)
-        return _stt_model
 
 
 warnings.filterwarnings(
@@ -1808,48 +1775,6 @@ def upload_audio(
     with dest_path.open("wb") as handle:
         shutil.copyfileobj(file.file, handle)
     return {"saved_path": str(dest_path), "filename": filename}
-
-
-@app.post("/transcribe_audio")
-async def transcribe_audio(
-    file: UploadFile = File(...),
-    language: str | None = Form("en"),
-):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="audio file is required")
-
-    suffix = Path(file.filename).suffix or ".webm"
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = Path(tmp.name)
-            content = await file.read()
-            tmp.write(content)
-
-        model = _get_stt_model()
-        segments, info = model.transcribe(
-            str(tmp_path),
-            language=language or None,
-            vad_filter=True,
-            beam_size=1,
-            word_timestamps=False,
-        )
-        text = " ".join(seg.text.strip() for seg in segments if seg.text).strip()
-        return {
-            "text": text,
-            "language": getattr(info, "language", language or "unknown"),
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("component=stt op=transcribe status=error")
-        raise HTTPException(status_code=500, detail=f"Transcription failed: {exc}") from exc
-    finally:
-        with contextlib.suppress(Exception):
-            await file.close()
-        if tmp_path and tmp_path.exists():
-            with contextlib.suppress(Exception):
-                tmp_path.unlink()
 
 
 @app.post("/preprocess")

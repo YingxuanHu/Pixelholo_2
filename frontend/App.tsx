@@ -26,8 +26,6 @@ type TrainParams = {
   maxLen: number;
 };
 
-type ProfileType = 'voice' | 'avatar';
-
 const DEFAULT_API_BASE = 'http://127.0.0.1:8000';
 const LOCAL_STORAGE_API_BASE_KEY = 'voxclone_api_base';
 const DEFAULT_PROFILE_TYPE: 'voice' | 'avatar' = 'voice';
@@ -990,7 +988,7 @@ const App: React.FC = () => {
           <div className="h-4 bg-amber-200 rounded-full overflow-hidden">
             <div className="h-full bg-amber-600 transition-all duration-700" style={{ width: `${(trainStats.currentEpoch / trainStats.totalEpochs) * 100}%` }}></div>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-bold">
+          <div className="grid grid-cols-2 gap-4 text-xs font-bold">
             <div className="bg-white p-2 rounded border border-amber-100">GPU: {trainStats.gpuMemory}</div>
             <div className="bg-white p-2 rounded border border-amber-100">Steps: {trainStats.steps.toLocaleString()}</div>
           </div>
@@ -1027,7 +1025,7 @@ const App: React.FC = () => {
             style={{ width: `${Math.round((preprocessDisplayProgress ?? 0) * 100)}%` }}
           ></div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-bold">
+        <div className="grid grid-cols-2 gap-4 text-xs font-bold">
           <div className="bg-white p-2 rounded border border-amber-100">
             Kept: {preprocessStats?.segmentsKept ?? '—'}
           </div>
@@ -1085,7 +1083,7 @@ const App: React.FC = () => {
                 <div className="space-y-4">
                   <div className="bg-white p-4 rounded-xl border border-slate-100">
                     <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Workflow</label>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
                         onClick={() => {
@@ -1633,7 +1631,7 @@ const App: React.FC = () => {
                         <span className="uppercase tracking-widest text-[9px] font-bold text-slate-400">Avatar Preview</span>
                         <span className="text-[10px] font-bold text-teal-300">{outputMode === 'avatar' ? `${videoFps} FPS · ${videoQueue} queued` : 'disabled'}</span>
                       </div>
-                      <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[52vh] md:min-h-[720px] w-full max-w-[640px] mx-auto">
+                      <div className="mt-3 bg-black rounded-xl overflow-hidden border border-slate-800 flex-1 min-h-[720px] w-full max-w-[640px] mx-auto">
                         <canvas ref={videoCanvasRef} width={640} height={853} className="w-full h-full" />
                       </div>
                       <div className="mt-3 text-[11px] text-slate-400 flex items-center justify-between">
@@ -1649,9 +1647,7 @@ const App: React.FC = () => {
                       <div className="mt-4">
                         <ControlPanel
                           variant="embedded"
-                          apiBase={apiBase}
                           onInterrupt={stopInference}
-                          onVoiceInputStart={unlockAudio}
                           onSendChat={async (text) => runInference(text, '/chat')}
                           onSendDirect={async (text) => {
                             setInferenceText(text);
@@ -1664,7 +1660,7 @@ const App: React.FC = () => {
                 </div>
 
                 {latency && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-in slide-in-from-top-4">
+                  <div className="grid grid-cols-2 gap-4 animate-in slide-in-from-top-4">
                     <div className="bg-slate-900 p-6 rounded-2xl flex items-center justify-between">
                       <div>
                         <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Time to First Audio</p>

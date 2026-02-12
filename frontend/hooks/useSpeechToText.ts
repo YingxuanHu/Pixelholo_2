@@ -5,27 +5,17 @@ type SpeechResultHandler = (text: string) => void;
 export const useSpeechToText = (onFinalText: SpeechResultHandler) => {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
-  const [hasSupport, setHasSupport] = useState(false);
   const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      recognitionRef.current = null;
-      setHasSupport(false);
-      return;
-    }
+    if (!SpeechRecognition) return;
 
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.lang = 'en-US';
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      setIsListening(true);
-    };
+    recognition.interimResults = true;
 
     recognition.onresult = (event: any) => {
       const current = event.resultIndex;
@@ -45,18 +35,6 @@ export const useSpeechToText = (onFinalText: SpeechResultHandler) => {
     };
 
     recognitionRef.current = recognition;
-    setHasSupport(true);
-
-    return () => {
-      try {
-        recognition.stop();
-      } catch {
-        // ignore cleanup errors
-      }
-      recognitionRef.current = null;
-      setHasSupport(false);
-      setIsListening(false);
-    };
   }, [onFinalText]);
 
   const startListening = () => {
@@ -70,22 +48,10 @@ export const useSpeechToText = (onFinalText: SpeechResultHandler) => {
     }
   };
 
-  const stopListening = () => {
-    if (!recognitionRef.current) return;
-    try {
-      recognitionRef.current.stop();
-    } catch {
-      // ignore duplicate stops
-    } finally {
-      setIsListening(false);
-    }
-  };
-
   return {
     isListening,
     transcript,
     startListening,
-    stopListening,
-    hasSupport,
+    hasSupport: Boolean(recognitionRef.current),
   };
 };
