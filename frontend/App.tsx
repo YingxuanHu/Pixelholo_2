@@ -11,6 +11,7 @@ import {
   TrainStats,
   InferenceChunk,
   ProfileInfo,
+  ProfileType,
 } from './types';
 
 type TrainFlags = {
